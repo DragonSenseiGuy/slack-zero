@@ -35,7 +35,7 @@ describe('parseEnv', () => {
   it('applies defaults for the optional non-secret vars', () => {
     const env = parseEnv(MINIMAL);
     expect(env.HACKCLUB_AI_BASE_URL).toBe('https://ai.hackclub.com/proxy/v1');
-    expect(env.LLM_MODEL).toBe('anthropic/claude-opus-5');
+    expect(env.LLM_MODEL).toBe('qwen/qwen3-32b');
     expect(env.APP_BASE_URL).toBe('https://localhost:3000');
     expect(env.SLACK_REDIRECT_URI).toBe(
       'https://localhost:3000/api/slack/oauth/callback',
@@ -53,7 +53,7 @@ describe('parseEnv', () => {
     expect(env.SLACK_CLIENT_ID).toBeUndefined();
     expect(env.HACKCLUB_AI_API_KEY).toBeUndefined();
     // ...and the default still wins for vars that have one.
-    expect(env.LLM_MODEL).toBe('anthropic/claude-opus-5');
+    expect(env.LLM_MODEL).toBe('qwen/qwen3-32b');
   });
 
   it('keeps values that are provided', () => {
@@ -125,7 +125,7 @@ describe('requireLlmEnv', () => {
     expect(requireLlmEnv(env)).toEqual({
       baseUrl: 'https://ai.hackclub.com/proxy/v1',
       apiKey: 'hc-key',
-      model: 'anthropic/claude-opus-5',
+      model: 'qwen/qwen3-32b',
     });
   });
 });

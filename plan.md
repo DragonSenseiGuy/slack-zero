@@ -54,44 +54,87 @@ rather than silently working around it.
 ---
 
 ## Phase 0: Project Scaffolding & Slack App Setup
-**Status:** In progress — code complete, **testing INCOMPLETE**. Do not treat
-Phase 0 as Done and do not start Phase 1 until the unfinished checks below
-pass. Credentials are now in `.env` (user filled them 2026-07-24), so the
-live checks are runnable — they just haven't been run yet.
+**Status:** Blocked: the live OAuth round-trip cannot complete because this
+network's content filter (safebrowse.io) intercepts the ngrok tunnel domain.
+Everything else in Phase 0 is verified. Do not start Phase 1 until the OAuth
+item below is green.
 
-**Passed so far** (Next.js 14.2.35, Postgres 16 on host port **5433**):
-- `npm run test` → 4 files, **49 tests passed** (OAuth callback with mocked
+**Verified 2026-07-24** (Next.js 14.2.35, Postgres 16 on host port **5433**):
+- `npm run test` → 5 files, **55 tests passed** (OAuth callback with mocked
   Slack: success + bad/missing state + `ok:false` + missing code; state HMAC
-  sign/verify; env loader)
+  sign/verify; env loader; LLM client wrapper with the provider SDK mocked)
 - `npx tsc --noEmit` clean · `npm run lint` clean · `npm run build` succeeds
   (6 routes)
-- `npm run dev` boots clean; `GET /api/health` → HTTP 200,
-  `{db: ok (connected, 3ms), slack: not_configured, llm: not_configured}` —
-  `not_configured` is the expected pre-credential state
+- **`npm run test:e2e` → 3/3 passed** (chromium). Playwright browsers had to be
+  installed first (`npx playwright install`). The existing `webServer` config
+  (build + `next start` on port 3100) worked as written — no changes needed.
+- `npm run dev` boots clean; `GET /api/health` → HTTP 200 with **`db: ok`** and
+  **`llm: ok`** ("Hack Club AI reachable; default model qwen/qwen3-32b (690
+  models available)"). `slack` is still `not_configured` — correct, since no
+  installation is stored yet.
+- **One real LLM call** through `src/lib/llm/client.ts` against
+  `qwen/qwen3-32b` on the live Hack Club AI proxy: returned a real completion,
+  and a JSON-mode classification call returned parseable
+  `{urgency_score, category, reason}`. Phase 3's wiring is proven.
+- `/api/slack/oauth/start` returns 307 to `slack.com/oauth/v2/authorize` with a
+  populated `client_id`, all 13 user scopes from `src/lib/slack/scopes.ts`, the
+  `.env` `redirect_uri`, and a signed `state` also set as an httpOnly/Secure
+  cookie (600s TTL). The route itself is correct.
 - App manifest independently re-checked against Slack's current schema:
   `settings.event_subscriptions.user_events` is valid for user-token events,
   and `features.bot_user` is optional under Socket Mode
 
-**NOT yet run — Phase 0 is not Done until every item here passes:**
-1. **Playwright e2e was never executed.** `e2e/smoke.spec.ts` was written in
-   this phase but `npm run test:e2e` has not been run even once, so the
-   Playwright setup itself is unproven (browsers may not even be installed —
-   check `npx playwright install`).
-2. **Live OAuth round-trip.** Run `npm run dev:https`, click Connect Slack,
-   approve, and confirm a real `xoxp-` user token lands in the
-   `SlackInstallation` table. This is plan.md's "OAuth flow completes and a
-   valid Slack token is stored" item — the only Phase 0 verification bullet
-   still unmet by an automated test.
-3. **`/api/health` with credentials present.** Must report `slack: ok` (real
-   `auth.test` call succeeds) and `llm: ok` (real reachability check against
-   Hack Club AI). Both currently only ever returned `not_configured`.
-4. **One real LLM call** through `src/lib/llm/client.ts` against
-   `qwen/qwen3-32b`, to prove the Hack Club AI wiring works before Phase 3
-   depends on it. The client has never been exercised against the live API.
+**Two bugs found and fixed while verifying:**
+- `LLM_MODEL`'s fallback default in `src/lib/env.ts` was
+  `anthropic/claude-opus-5`, contradicting `.env.example`,
+  `SLACK_APP_SETUP.md`, and the user's explicit "no frontier models for small,
+  high-volume tasks" decision. If `LLM_MODEL` were ever unset, every
+  per-message classification would have silently gone to a frontier model.
+  Default is now `qwen/qwen3-32b`.
+- `chat()` in `src/lib/llm/client.ts` silently returned `text: ''` when the
+  provider truncated the response. This matters specifically because the
+  default model is a *reasoning* model: the proxy returns its hidden reasoning
+  in a separate `message.reasoning` field (so `content` is clean — no `<think>`
+  blocks leak, confirmed against the live API), but that reasoning still spends
+  the `max_tokens` budget. A too-small budget yields `content: null` +
+  `finish_reason: 'length'`. `chat()` now surfaces `finishReason` and throws a
+  descriptive `LlmError` instead of handing callers an empty string to parse.
+  **Phase 3 must budget `maxTokens` generously** — reasoning alone used ~94
+  tokens on a trivial prompt.
 
-Note for whoever picks this up: items 1–4 are all runnable now — the blocker
-that produced them (missing credentials) is resolved. Re-run the passing
-checks above too, since `.env` changed after they ran.
+**STILL NOT DONE — the one remaining item:**
+1. **Live OAuth round-trip.** `SlackInstallation` still has **0 rows**; no
+   `xoxp-` token has ever been stored, and `/api/health` therefore cannot
+   report `slack: ok`. The code path is verified as far as it can be without a
+   browser (see `/api/slack/oauth/start` above), but the approval click needs
+   the user.
+
+   **Blocker:** the tunnel domain in `SLACK_REDIRECT_URI` /`APP_BASE_URL`
+   (`https://nonconcentrative-inattentively-christie.ngrok-free.dev`) is
+   unreachable from this machine. DNS is fine (identical answers from the
+   system resolver, 1.1.1.1 and 8.8.8.8, all pointing at genuine ngrok AWS
+   IPs) and the ngrok agent reports the tunnel healthy, but something in the
+   network path hijacks it: port 443 answers with non-TLS bytes
+   (`WRONG_VERSION_NUMBER` from curl, node, python and openssl alike) and port
+   80 returns `302 -> www.safebrowse.io/warn.html?...`. Requesting the ngrok IP
+   directly with a `Host` header reproduces the 302, so the interception is
+   in-path rather than DNS-based. This is a safebrowse.io content filter
+   blocking `*.ngrok-free.dev` (resolvers are Comcast `75.75.75.75`).
+
+   Since Slack redirects the *browser* to that same domain after approval, the
+   callback cannot reach our server while the filter is active.
+
+   **To unblock, pick one:** (a) allow `*.ngrok-free.dev` in the
+   safebrowse/Xfinity filter, or (b) use a tunnel host that isn't filtered —
+   which means updating `SLACK_REDIRECT_URI` **and** `APP_BASE_URL` in `.env`
+   *and* the Redirect URL in the Slack app dashboard so all three match.
+   Then open `<tunnel>/api/slack/oauth/start` — it must be the tunnel origin,
+   **not** `localhost:3000`, because the signed state cookie is set on the
+   origin the callback returns to. Confirm afterwards that a real `xoxp-` token
+   landed in `SlackInstallation` and that `/api/health` reports `slack: ok`.
+
+   Do not work around this by pasting a token in by hand — that would leave the
+   OAuth path itself unverified, which is the whole point of the check.
 
 **Objective:** Empty-but-running app, with a real Slack app configured and
 OAuth working end to end.

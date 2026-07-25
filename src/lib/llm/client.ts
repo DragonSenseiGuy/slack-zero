@@ -7,8 +7,11 @@ import { getEnv, isLlmConfigured, requireLlmEnv } from '@/lib/env';
  *
  * Provider: Hack Club AI (https://ai.hackclub.com), an OpenAI-compatible proxy.
  * This is a deliberate swap away from calling the Anthropic API directly —
- * user decision, 2026-07-24. Claude models are still reachable through it
- * (e.g. `anthropic/claude-opus-5`).
+ * user decision, 2026-07-24. Larger models are still reachable through the same
+ * proxy, but the default is deliberately the small open-weight
+ * `qwen/qwen3-32b`: classification is per-message and high-volume, so frontier
+ * models are off the table for it. Only override `model` per-call if a task
+ * demonstrably fails on the default, and flag it when you do.
  *
  * Everything else in the app must import from this module rather than reaching
  * for `openai` (or any other SDK) directly, so that swapping providers later is
@@ -50,6 +53,8 @@ export type ChatResponse = {
   text: string;
   /** Model that actually served the request, as reported by the provider. */
   model: string;
+  /** Provider's stop reason, e.g. `'stop'` or `'length'`. */
+  finishReason?: string;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -126,9 +131,28 @@ export async function chat(request: ChatRequest): Promise<ChatResponse> {
     );
 
     const choice = completion.choices[0];
+    const text = choice?.message?.content ?? '';
+    const finishReason = choice?.finish_reason;
+
+    // Reasoning models (the default `qwen/qwen3-32b` included) spend part of
+    // the max_tokens budget on hidden reasoning before emitting any content.
+    // The proxy returns that separately (`message.reasoning`), so it never
+    // pollutes `content` — but if the budget runs out during reasoning, the
+    // provider replies with `content: null` and `finish_reason: 'length'`.
+    // Failing loudly beats handing callers a silent empty string to parse.
+    if (text === '' && finishReason === 'length') {
+      throw new LlmError(
+        'Hack Club AI returned no content: the response was truncated ' +
+          '(finish_reason=length) before any text was emitted. Reasoning ' +
+          'models consume max_tokens on hidden reasoning first — raise ' +
+          `maxTokens (was ${request.maxTokens ?? 'unset'}).`,
+      );
+    }
+
     return {
-      text: choice?.message?.content ?? '',
+      text,
       model: completion.model,
+      finishReason,
       usage: completion.usage
         ? {
             promptTokens: completion.usage.prompt_tokens,
@@ -138,6 +162,10 @@ export async function chat(request: ChatRequest): Promise<ChatResponse> {
         : undefined,
     };
   } catch (error) {
+    // Our own truncation error above is already well-formed; don't re-wrap it.
+    if (error instanceof LlmError) {
+      throw error;
+    }
     if (error instanceof OpenAI.APIError) {
       throw new LlmError(
         `Hack Club AI request failed (${error.status ?? 'no status'}): ${error.message}`,

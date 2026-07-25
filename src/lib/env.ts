@@ -52,7 +52,10 @@ const envSchema = z.object({
     'https://ai.hackclub.com/proxy/v1',
   ),
   HACKCLUB_AI_API_KEY: optionalString,
-  LLM_MODEL: optionalStringWithDefault('anthropic/claude-opus-5'),
+  // Small open-weight model on purpose: classification is per-message and
+  // high-volume, and the default must never silently be a frontier model
+  // (user decision, 2026-07-24). Matches .env.example and SLACK_APP_SETUP.md.
+  LLM_MODEL: optionalStringWithDefault('qwen/qwen3-32b'),
 });
 
 export type Env = z.infer<typeof envSchema>;

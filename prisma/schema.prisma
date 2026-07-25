@@ -1,0 +1,46 @@
+// SlackZero Prisma schema.
+//
+// Phase 0 scope only: just enough to persist a Slack OAuth installation.
+// The message/conversation/classification data model is Phase 1's job — do not
+// add it here ahead of time.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// One Slack OAuth installation: a single authed user in a single workspace.
+/// This app is deliberately single-user (see CLAUDE.md), but the table is keyed
+/// on (teamId, authedUserId) so reconnecting or switching workspaces upserts
+/// cleanly instead of piling up rows.
+model SlackInstallation {
+  id String @id @default(cuid())
+
+  /// Slack workspace ("team") id, e.g. "T01234567".
+  teamId   String
+  /// Human-readable workspace name at install time.
+  teamName String
+
+  /// Slack user id of the person who authorized the app, e.g. "U01234567".
+  authedUserId String
+
+  /// User token (xoxp-...) from `authed_user.access_token`. This is the token
+  /// the app acts with. Server-side only — never send it to the client.
+  userAccessToken String
+
+  /// Bot token (xoxb-...), if any bot scopes were granted. Nullable because
+  /// SlackZero is primarily a user-token app.
+  botAccessToken String?
+
+  /// Space-delimited scopes actually granted, as returned by Slack.
+  scopes String
+
+  installedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([teamId, authedUserId])
+}

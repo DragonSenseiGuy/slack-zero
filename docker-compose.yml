@@ -1,0 +1,31 @@
+# Local development database for SlackZero.
+#
+# Host port note: 5432 was already in use on this machine by another project's
+# Postgres container, so this dev DB is published on host port 5433 instead.
+# Keep DATABASE_URL in .env / .env.example pointed at 5433 to match.
+#
+#   docker compose up -d      # start
+#   docker compose down       # stop (data survives in the named volume)
+#   docker compose down -v    # stop and destroy the data
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: slackzero-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: slackzero
+      POSTGRES_PASSWORD: slackzero
+      POSTGRES_DB: slackzero
+    ports:
+      - "5433:5432"
+    volumes:
+      - slackzero-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slackzero -d slackzero"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  slackzero-pgdata:

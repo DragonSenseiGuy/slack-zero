@@ -168,9 +168,118 @@ OAuth working end to end.
 ---
 
 ## Phase 1: Slack Data Ingestion
-**Status:** Not started
+**Status:** Done — all three verification bullets pass, including the live
+Socket Mode round-trip (completed 2026-07-25). Live coverage is *new message*
+ingestion only; the edit, delete, and reaction paths are fixture-tested but
+have not been observed against live Slack.
 
 **Objective:** Pull real DM, mention, and thread data from Slack into our DB.
+
+**What was built (2026-07-25):**
+- `src/lib/slack/raw.ts` — narrow structural types for the Slack payload fields
+  we actually read. Nothing downstream imports `@slack/web-api` response types.
+- `src/lib/slack/normalize.ts` — the ingestion boundary. Pure functions
+  (no DB, no network, no clock), which is what makes verification #2 possible
+  without a live workspace.
+- `src/lib/slack/ingest.ts` — persistence. Every write upserts on a
+  Slack-owned identity, so re-ingestion converges instead of duplicating.
+- `src/lib/slack/backfill.ts` + `npm run backfill` — the backfill job.
+- `src/lib/slack/socket.ts` + `npm run socket` — the Socket Mode listener.
+- `scripts/verify-backfill.ts` + `npm run backfill:verify` — recounts Slack
+  independently of the ingestion code and diffs it against Postgres.
+
+**Backfill scope decision:** plan.md says "recent DMs, mpims, and channel
+mentions", so backfill reads history for IMs/mpims only and reaches channels
+solely through `search.messages` mention hits. It does *not* pull full history
+for every channel in the workspace. `conversations.list` and `users.list` are
+still enumerated in full, because a `Conversation`/`User` row is needed to
+render any message that references them.
+
+**Deliberately NOT done here** (later phases own these): no LLM/classification
+call anywhere in the ingest path (Phase 3 — and CLAUDE.md requires ingestion
+never block on it), no queue UI (Phase 2), no snooze/done state written
+(Phases 2/6). The `Classification`, `MessageState`, and `ViewDefinition`
+tables are created by the migration but nothing reads or writes them yet.
+
+**Verified 2026-07-25:**
+- **#1 Backfill row counts.** Ran against the real BOOM workspace as
+  `U0BK9FR4Y1M`. First run: 11 users, 13 conversations (10 public channels +
+  3 IMs), 2 messages, 1 mention, 0 threads. Cross-checked with
+  `npm run backfill:verify`, which re-reads Slack directly rather than reusing
+  the ingestion code, so a shared bug cannot hide the mismatch — all five
+  counts matched. Re-running backfill reported `0 created` with unchanged
+  totals, confirming idempotency.
+  - Only 2 messages because the workspace genuinely has almost no DM traffic:
+    the self-DM is empty, and the one real DM contains a single "hello".
+  - `D0BKMJ9KLPP` (the Slackbot DM) is returned by `conversations.list` but
+    answers `channel_not_found` to `conversations.history`. Recorded as a
+    skipped conversation rather than crashing the run; the row exists with
+    `lastSyncedAt` null.
+- **#2 Normalization unit tests.** 52 tests in `normalize.test.ts` covering all
+  three edge cases plan.md names (threaded reply, edited message, message with
+  reactions) plus bot messages with no user id, `message_changed` /
+  `message_deleted` / tombstone events, `channel_join` noise, and ts parsing.
+  Fixture-driven; no live Slack. Plus 8 in `ingest.test.ts` (reaction merge
+  idempotency) and 14 in `socket.test.ts` (event routing, DB mocked).
+  Suite total: **126 tests, 8 files**, up from 55/5.
+- **#3 Live Socket Mode test — PASSED.** With `npm run socket` connected, six
+  real DMs were sent from `U0BEHBXNGHK` to `U0BK9FR4Y1M` in `D0BKMJLRRNH`
+  ("yolo", "testing", "hello", "you there?", "hola", "como estas"). All six
+  landed in Postgres with `source = EVENT`, **0.38s–1.85s** between Slack's
+  `ts` and our `firstSeenAt` — comfortably inside plan.md's "within a few
+  seconds". Each was ingested exactly once despite two installations existing
+  for this workspace, confirming the `(conversationId, ts)` dedup. Afterwards
+  `npm run backfill:verify` still reported all counts matching (Slack 7 DM
+  messages / DB 7), so the event path and the backfill path agree.
+  - The six rows were spot-checked in Postgres: each joins to conversation
+    `D0BKMJLRRNH` (`kind IM`, correct `peerUserId`), resolves its author to the
+    real `User` row for `dsg` rather than a stub, and carries no Slack-only
+    fields — `client_msg_id`, `user_profile`, `source_team` and friends are all
+    dropped at the boundary. `blocks` holds Block Kit verbatim, which is the
+    one documented deliberate exception.
+  - Re-running backfill afterwards, so it re-read all six live rows, reported
+    `0 created / 8 updated` with 8 distinct `(conversationId, ts)` pairs across
+    8 rows. That is a stronger idempotency check than the earlier one, because
+    the collisions were real rows written by the *other* ingestion path.
+  - **Caveat, stated plainly:** the live run exercised *new message* ingestion
+    only. The edit, delete, and reaction paths were not triggered against live
+    Slack — they are covered by fixture tests in `normalize.test.ts` and
+    `socket.test.ts`, but have not been observed end to end. Worth a real
+    edit/reaction spot-check during Phase 2.
+
+**Three bugs found and fixed while verifying:**
+- `upsertMessage` overwrote `source` on every update, so a backfill re-reading
+  a message that had arrived live flipped it `EVENT` -> `BACKFILL`. Since
+  `source` is meant to record how a message was *first* seen, this erased the
+  only evidence in the data that the Socket Mode path had worked. Found while
+  setting up the post-live dedup check. `source` is now written on insert only.
+- The mention pass overwrote conversation metadata. `search.messages` returns a
+  much thinner `channel` object than `conversations.list` — no `is_member`, no
+  `is_archived`, no topic — so routing it through the normal upsert silently
+  downgraded `#happenings` from `isMember: true` to `false`. Caught by diffing
+  the DB against the recon dump. Fixed with a separate
+  `ensureConversationFromReference()` that creates a row if missing and never
+  touches an existing one; `conversations.list` stays the authority for
+  metadata.
+- `e2e/smoke.spec.ts` asserted `Not connected yet.` unconditionally, which only
+  holds against an empty database. It has been failing since Phase 0's OAuth
+  round-trip stored an installation (Phase 0's "e2e 3/3" was recorded before
+  that). Rewritten to assert the invariant that actually holds — the page
+  renders exactly one of the two connection states with the matching action
+  link.
+
+**Note on Slack ts parsing:** `parseSlackTs` splits the string rather than
+computing `Number(ts) * 1000`. The float form sits at the edge of double
+precision and can round the millisecond the wrong way; there is a regression
+test for this.
+
+**Note on the two installation rows** (carried over from Phase 0): backfill
+ingested `U0BK9FR4Y1M`, as `getInstallation()` selects. This did not block
+anything. Socket Mode does not filter on authorization — when two users in one
+workspace have installed the app, Slack delivers the same message once per
+authorization, and the `(conversationId, ts)` upsert collapses the duplicate.
+Filtering instead would risk dropping a message whose envelope names the other
+account.
 
 **Tasks:**
 - Data models (Prisma schema): `Message`, `Conversation`, `User`,

@@ -1,8 +1,17 @@
 // SlackZero Prisma schema.
 //
-// Phase 0 scope only: just enough to persist a Slack OAuth installation.
-// The message/conversation/classification data model is Phase 1's job — do not
-// add it here ahead of time.
+// Phases 0-1. Phase 0 added `SlackInstallation`; Phase 1 adds the ingestion
+// data model (`User`, `Conversation`, `Message`) plus the three tables later
+// phases will fill in (`Classification` for Phase 3, `MessageState` for
+// Phases 2/6, `ViewDefinition` for Phase 4) — plan.md's Phase 1 task list
+// asks for all six up front so the shape is settled before anything depends
+// on it.
+//
+// Naming convention: `id` on Slack-owned entities is the *Slack* id
+// (`U...`/`C...`/`D...`), because Slack is the source of truth for content and
+// we only layer our own state on top. `Message` is the exception: a Slack
+// message has no global id, only a per-conversation `ts`, so it gets a cuid
+// and a `@@unique([conversationId, ts])` that provides ingestion idempotency.
 
 generator client {
   provider = "prisma-client-js"
@@ -43,4 +52,258 @@ model SlackInstallation {
   updatedAt   DateTime @updatedAt
 
   @@unique([teamId, authedUserId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: ingestion data model
+// ---------------------------------------------------------------------------
+
+/// What kind of Slack conversation this is. `UNKNOWN` exists so an unexpected
+/// channel id prefix can still be ingested rather than dropped.
+enum ConversationKind {
+  IM
+  MPIM
+  PRIVATE_CHANNEL
+  PUBLIC_CHANNEL
+  UNKNOWN
+}
+
+/// Where a stored row came from. Useful when debugging gaps: a conversation
+/// with only `EVENT` messages was never backfilled.
+enum IngestSource {
+  BACKFILL
+  EVENT
+}
+
+/// A Slack workspace member (human or bot user), as needed to render a message
+/// author. Populated from `users.list` during backfill.
+model User {
+  /// Slack user id, e.g. "U01234567" or "USLACKBOT".
+  id String @id
+
+  teamId String?
+
+  /// Slack's `name` (the handle), e.g. "ada".
+  username    String?
+  /// `profile.real_name`, e.g. "Ada Lovelace".
+  realName    String?
+  /// `profile.display_name` — what Slack actually shows, when set.
+  displayName String?
+  /// `profile.image_72`. A URL only; we never proxy or cache the image.
+  avatarUrl   String?
+  /// IANA tz, e.g. "America/New_York". Phase 7 wants it for response times.
+  timezone    String?
+
+  isBot     Boolean @default(false)
+  isDeleted Boolean @default(false)
+
+  messages Message[]
+
+  firstSeenAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// A DM, group DM, or channel. One row per Slack conversation id.
+model Conversation {
+  /// Slack conversation id: "D..." for IMs, "C..."/"G..." for channels/mpims.
+  id String @id
+
+  teamId String?
+  kind   ConversationKind
+
+  /// Channel name without the leading "#". Null for IMs, which have no name.
+  name String?
+
+  /// For an IM, the Slack id of the person on the other end. Slack reports
+  /// this as `channel.user`. Null for channels and group DMs.
+  peerUserId String?
+
+  topic   String?
+  purpose String?
+
+  isArchived Boolean @default(false)
+  /// Whether the authed user is a member. Public channels are readable with
+  /// `channels:history` without joining, so this is display metadata, not a
+  /// permission check.
+  isMember   Boolean @default(false)
+
+  messages Message[]
+
+  /// When backfill last successfully read this conversation's history. Null
+  /// means "never read" — including the case where Slack refused (see the
+  /// `ConversationSyncError` note in src/lib/slack/backfill.ts).
+  lastSyncedAt DateTime?
+
+  firstSeenAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([kind])
+}
+
+/// A single Slack message, normalized. Raw Slack payload shapes stop here:
+/// nothing above the ingestion boundary should ever see a `WebAPICallResult`
+/// (see CLAUDE.md, "Keep Slack API response shapes and our internal data
+/// model clearly separated").
+model Message {
+  id String @id @default(cuid())
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  /// Slack's message timestamp string, e.g. "1784938592.138359". Unique per
+  /// conversation and doubles as the message's Slack-side identity.
+  ts String
+
+  /// `ts` parsed to a real instant, so the DB can sort and range-query.
+  sentAt DateTime
+
+  /// `thread_ts` when the message belongs to a thread. Equals `ts` on the
+  /// thread parent, differs on a reply.
+  threadTs String?
+  /// True when this is a reply *inside* a thread (`thread_ts != ts`).
+  isThreadReply Boolean @default(false)
+  /// True when this message has a thread hanging off it (`thread_ts == ts`).
+  isThreadParent Boolean @default(false)
+  /// Slack's `reply_count` on a thread parent; 0 otherwise.
+  replyCount Int @default(0)
+
+  /// Author. Null for classic bot messages, which carry only a `bot_id`.
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  /// Slack `bot_id` for messages posted by an integration.
+  botId String?
+  /// `username`/`bot_profile.name` — the display name for a bot message whose
+  /// author has no `User` row.
+  authorName String?
+
+  /// Slack message subtype ("bot_message", "channel_join", ...). Null for an
+  /// ordinary human message.
+  subtype String?
+
+  text String
+
+  /// Slack Block Kit payload, kept verbatim so richer rendering stays possible
+  /// later without re-fetching. Never read by the UI as-is.
+  blocks Json?
+
+  isEdited Boolean   @default(false)
+  editedAt DateTime?
+
+  /// Soft delete: Slack sends `message_deleted` and we keep the row so
+  /// classification/state history is not orphaned.
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  hasFiles Boolean @default(false)
+
+  /// Normalized reactions: `[{ name, count, userIds }]`, sorted by name so the
+  /// stored value is stable across re-ingestion.
+  reactions Json?
+
+  /// Slack user ids mentioned in the text, parsed from `<@U...>`.
+  mentionedUserIds String[]
+
+  source IngestSource @default(BACKFILL)
+
+  classification Classification?
+  state          MessageState?
+
+  firstSeenAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// The dedup key. Re-running backfill upserts on this instead of inserting
+  /// duplicates.
+  @@unique([conversationId, ts])
+  @@index([sentAt])
+  @@index([conversationId, threadTs])
+}
+
+/// Phase 3 fills this in. Defined here so the ingestion schema is complete.
+enum MessageCategory {
+  ACTION_NEEDED
+  MISC
+  FYI
+}
+
+/// AI triage output for one message. One row per message (latest result wins);
+/// `reason` is mandatory because CLAUDE.md requires scores be debuggable.
+model Classification {
+  id String @id @default(cuid())
+
+  messageId String  @unique
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  /// 0-100.
+  urgencyScore Int
+  category     MessageCategory
+
+  /// True when this message is a "any update on this?" follow-up.
+  isBump Boolean @default(false)
+  /// The earlier message this one bumps, if identified.
+  bumpOfMessageId String?
+
+  /// The model's short explanation. Required, not optional metadata.
+  reason String
+
+  /// Model id that produced this, e.g. "qwen/qwen3-32b" — so a model change is
+  /// visible in the data rather than silently reinterpreting old scores.
+  model String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category, urgencyScore])
+}
+
+/// SlackZero's own triage state for a message, deliberately separate from
+/// Slack's read/unread. Phase 2 uses `isDone`; Phase 6 uses the rest.
+model MessageState {
+  id String @id @default(cuid())
+
+  messageId String  @unique
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  isDone Boolean   @default(false)
+  doneAt DateTime?
+
+  /// When set and in the future, the message is hidden from the queue.
+  snoozedUntil DateTime?
+  snoozedAt    DateTime?
+
+  /// Set when the user is waiting on someone else's reply to this message.
+  isWaitingOn    Boolean   @default(false)
+  waitingOnSince DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isDone])
+  @@index([snoozedUntil])
+}
+
+/// Phase 4 fills this in: a saved view (name + filters + sort + layout).
+/// `filters` is JSON on purpose — the filter vocabulary is still moving, and
+/// pinning it to columns now would mean a migration per new filter.
+model ViewDefinition {
+  id String @id @default(cuid())
+
+  name String @unique
+
+  /// "detailed" | "dense".
+  layout String @default("detailed")
+
+  /// Filter set, validated with zod at the edge rather than by the DB.
+  filters Json
+
+  /// "newest" | "oldest" | "urgency" | "vip_unread_first".
+  sort String @default("newest")
+
+  /// True for the views shipped out of the box ("Needs Reply", ...).
+  isBuiltIn Boolean @default(false)
+  /// Sidebar ordering.
+  position Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

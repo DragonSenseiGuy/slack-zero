@@ -54,12 +54,10 @@ rather than silently working around it.
 ---
 
 ## Phase 0: Project Scaffolding & Slack App Setup
-**Status:** Blocked: the live OAuth round-trip cannot complete because this
-network's content filter (safebrowse.io) intercepts the ngrok tunnel domain.
-Everything else in Phase 0 is verified. Do not start Phase 1 until the OAuth
-item below is green.
+**Status:** Done — all four verification bullets pass, including the live OAuth
+round-trip (completed 2026-07-25).
 
-**Verified 2026-07-24** (Next.js 14.2.35, Postgres 16 on host port **5433**):
+**Verified 2026-07-24/25** (Next.js 14.2.35, Postgres 16 on host port **5433**):
 - `npm run test` → 5 files, **55 tests passed** (OAuth callback with mocked
   Slack: success + bad/missing state + `ok:false` + missing code; state HMAC
   sign/verify; env loader; LLM client wrapper with the provider SDK mocked)
@@ -102,39 +100,47 @@ item below is green.
   **Phase 3 must budget `maxTokens` generously** — reasoning alone used ~94
   tokens on a trivial prompt.
 
-**STILL NOT DONE — the one remaining item:**
-1. **Live OAuth round-trip.** `SlackInstallation` still has **0 rows**; no
-   `xoxp-` token has ever been stored, and `/api/health` therefore cannot
-   report `slack: ok`. The code path is verified as far as it can be without a
-   browser (see `/api/slack/oauth/start` above), but the approval click needs
-   the user.
+**Live OAuth round-trip — PASSED 2026-07-25:**
+- Real `xoxp-` user tokens (82 chars) + bot tokens stored in
+  `SlackInstallation` for workspace **BOOM** (`T0BEJLG8H1U`). No token was
+  pasted in by hand — the full browser approval flow was exercised
+  (`/api/slack/oauth/start` → Slack → `/api/slack/oauth/callback` →
+  `/?slack_connected=1`).
+- `GET /api/health` now reports **`slack: ok`** — "authenticated as
+  `U0BK9FR4Y1M` in BOOM" via a real `auth.test` — alongside `db: ok` and
+  `llm: ok`.
 
-   **Blocker:** the tunnel domain in `SLACK_REDIRECT_URI` /`APP_BASE_URL`
-   (`https://nonconcentrative-inattentively-christie.ngrok-free.dev`) is
-   unreachable from this machine. DNS is fine (identical answers from the
-   system resolver, 1.1.1.1 and 8.8.8.8, all pointing at genuine ngrok AWS
-   IPs) and the ngrok agent reports the tunnel healthy, but something in the
-   network path hijacks it: port 443 answers with non-TLS bytes
-   (`WRONG_VERSION_NUMBER` from curl, node, python and openssl alike) and port
-   80 returns `302 -> www.safebrowse.io/warn.html?...`. Requesting the ngrok IP
-   directly with a `Host` header reproduces the 302, so the interception is
-   in-path rather than DNS-based. This is a safebrowse.io content filter
-   blocking `*.ngrok-free.dev` (resolvers are Comcast `75.75.75.75`).
+**Local HTTPS instead of a tunnel (setup change made during this phase):**
+The ngrok tunnel originally in `.env` is unusable on this network: an ISP
+content filter (safebrowse.io, Comcast resolvers) blocks `*.ngrok-free.dev` on
+both IPv4 and IPv6 — TLS handshake failure on 443, `302` to a warning page on
+80 — while `ngrok.com` itself resolves fine and the ngrok agent reports the
+tunnel healthy. The filter also proved to be *intermittent*: it briefly lifted,
+then re-engaged mid-session.
 
-   Since Slack redirects the *browser* to that same domain after approval, the
-   callback cannot reach our server while the filter is active.
+No tunnel is actually required: Slack events arrive over Socket Mode, and the
+OAuth callback is only a browser redirect. So `.env` now uses
+`https://localhost:3000` (the value `.env.example` and `SLACK_APP_SETUP.md`
+already documented as the default; the ngrok values are kept commented out).
 
-   **To unblock, pick one:** (a) allow `*.ngrok-free.dev` in the
-   safebrowse/Xfinity filter, or (b) use a tunnel host that isn't filtered —
-   which means updating `SLACK_REDIRECT_URI` **and** `APP_BASE_URL` in `.env`
-   *and* the Redirect URL in the Slack app dashboard so all three match.
-   Then open `<tunnel>/api/slack/oauth/start` — it must be the tunnel origin,
-   **not** `localhost:3000`, because the signed state cookie is set on the
-   origin the callback returns to. Confirm afterwards that a real `xoxp-` token
-   landed in `SlackInstallation` and that `/api/health` reports `slack: ok`.
+`npm run dev:https` had a real footgun that this exposed: bare
+`next dev --experimental-https` shells out to `mkcert -install`, which needs an
+interactive sudo password to add a CA to the system trust store, and when that
+prompt can't be answered **Next silently falls back to plain HTTP** — the
+server looks healthy while Slack rejects every redirect URI. The script now
+generates a cert with openssl via `npm run certs` (idempotent) and passes it
+explicitly with `--experimental-https-key/--experimental-https-cert`. Verified
+serving `https://localhost:3000`. `*.pem` and `/certificates/` were already
+gitignored.
 
-   Do not work around this by pasting a token in by hand — that would leave the
-   OAuth path itself unverified, which is the whole point of the check.
+**Open question for the user (not blocking):** two installation rows exist for
+workspace BOOM — the flow was run twice under two different Slack accounts
+(`U0BEHBXNGHK`, then `U0BK9FR4Y1M`). This is not a dedup bug;
+`saveInstallation` correctly upserts on `(teamId, authedUserId)`, so distinct
+users are distinct rows. But SlackZero is single-user, and
+`getInstallation()` returns the most recently updated row — currently
+`U0BK9FR4Y1M`. **Phase 1's backfill will therefore ingest `U0BK9FR4Y1M`'s
+DMs.** If that's the wrong account, delete the stray row before backfilling.
 
 **Objective:** Empty-but-running app, with a real Slack app configured and
 OAuth working end to end.

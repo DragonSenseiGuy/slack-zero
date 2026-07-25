@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "dev:https": "next dev --experimental-https",
+    "dev:https": "npm run certs && next dev --experimental-https --experimental-https-key ./certificates/localhost-key.pem --experimental-https-cert ./certificates/localhost.pem",
+    "certs": "test -f certificates/localhost.pem || (mkdir -p certificates && openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes -keyout certificates/localhost-key.pem -out certificates/localhost.pem -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1')",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

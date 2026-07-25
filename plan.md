@@ -39,6 +39,12 @@ rather than silently working around it.
   2. Implement the tasks.
   3. Write/run the tests listed under "Verification" for that phase.
   4. Only mark the phase done and hand off if verification passes.
+  5. **Commit the phase's work to git** once verification passes — one commit
+     per phase, message starting `Phase N: <short summary>`. Never commit
+     `.env` or any secret; check `git status` before staging. Commit locally
+     only — do not push, and do not create a remote.
+- If a phase ends up committed before its verification is complete (as Phase 0
+  was), say so plainly in the commit message rather than implying it's green.
 - If a phase's verification fails after reasonable effort, stop and surface
   the blocker instead of proceeding to the next phase.
 - Update the `Status` line at the top of each phase (`Not started` /

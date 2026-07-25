@@ -22,6 +22,11 @@ not feature breadth.
   guessing silently and moving on.
 - Don't jump ahead to implement later-phase features early "while you're in
   there" — it breaks the incremental testability this plan is built around.
+- **Commit each phase to git** when its verification passes: one commit per
+  phase, message starting `Phase N: <short summary>`, and say so in the
+  message if anything is still unverified. Run `git status` before staging and
+  confirm `.env` (and anything else holding a secret) is not included. Local
+  commits only — don't push and don't add a remote unless asked.
 
 ## Tech stack
 - Next.js 14 (App Router), TypeScript, Tailwind CSS

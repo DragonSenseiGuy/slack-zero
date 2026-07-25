@@ -35,9 +35,19 @@ export default async function HomePage({
       <header>
         <h1 className="text-2xl font-semibold">SlackZero</h1>
         <p className="text-sm text-neutral-500">
-          Keyboard-first triage for Slack. Phase 0: setup only.
+          Keyboard-first triage for Slack. This page is setup and status; the
+          queue lives at <code>/inbox</code>.
         </p>
       </header>
+
+      <p>
+        <Link
+          className="inline-block rounded bg-neutral-900 px-4 py-2 text-sm font-medium text-white"
+          href="/inbox"
+        >
+          Open inbox →
+        </Link>
+      </p>
 
       {searchParams.slack_error ? (
         <p className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">

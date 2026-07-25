@@ -304,9 +304,111 @@ account.
 ---
 
 ## Phase 2: Unified Inbox UI Core
-**Status:** Not started
+**Status:** Done — all three verification items addressed (2026-07-25). The
+Playwright round-trip and the keyboard checklist pass; the "one click+read to
+triage" design check is a judgment call and is answered honestly below.
 
 **Objective:** A working queue UI — not smart yet, just fast.
+
+**What was built (2026-07-25):**
+- `src/lib/queue/queue.ts` — the queue model. Pure: inclusion rules
+  (`queueReasonFor`), labelling, recency sort, display filters, selection
+  arithmetic. Takes plain rows and lookup maps, never Prisma or the network,
+  which is what makes the rules fixture-testable.
+- `src/lib/queue/text.ts` — Slack `mrkdwn` → plain text. The one place that
+  knows `<@U…>` / `<#C…|name>` / `<https://x|label>` / `&amp;`. Without it the
+  UI would render raw Slack tokens, which is precisely the leak CLAUDE.md
+  forbids.
+- `src/lib/queue/time.ts` — relative timestamps, with `now` passed in rather
+  than read, so SSR and hydration agree.
+- `src/lib/queue/load.ts` — the IO half: reads Postgres, calls the pure
+  functions, returns a serializable `InboxData`. Server-side only.
+- `src/lib/queue/actions.ts` — `setMessageDone` server action, writing
+  `MessageState` (the table Phase 1 created for this).
+- `src/lib/keyboard/shortcuts.ts` — key event + mode → action, as a pure
+  function. `src/lib/palette/search.ts` — palette matching/ranking, also pure.
+- `src/app/inbox/*` — the split view: `page.tsx` (server), `InboxClient.tsx`,
+  `QueueList.tsx`, `ReadingPane.tsx`, `CommandPalette.tsx`.
+
+**Route decision:** the queue lives at **`/inbox`**, not `/`. `/` stays the
+setup/status page and gains an "Open inbox →" link. Moving the setup screen
+would have meant editing the OAuth callback's redirect target and the Phase 0
+unit tests that assert it, for no functional gain. Phase 8's polish pass is the
+natural place to revisit what `/` should be.
+
+**Queue inclusion rules** (all unit tested): DMs and group DMs; channel
+messages that @-mention the authed user; replies in threads the authed user
+participates in. Excluded: soft-deleted messages, membership/administrative
+subtypes, and the user's own messages — you do not triage yourself, and Phase 6
+owns the "waiting on others" view where sent messages resurface.
+
+**Done semantics:** done items leave the queue by default (inbox zero), with
+`u` / a header toggle to reveal them. The write is optimistic, and rolls back
+with an error banner if the server action fails.
+
+**Verified 2026-07-25:**
+- **#1 Playwright e2e — PASSED.** `e2e/inbox.spec.ts`, 7 tests, all green in a
+  full-suite run (`npm run test:e2e` → **10/10** including the 3 Phase 0/1
+  smoke tests). The required round-trip is one test: load the queue, `j` to the
+  second item, `e`, confirm it leaves the list, wait for the server to confirm
+  the write, **full page reload**, re-scope, confirm it is still absent, then
+  `u` and confirm it is present and flagged done. Undo is covered too.
+  - The spec seeds its own fixtures (`e2e/fixtures/seed.ts`) in an `E2E` id
+    namespace that cannot collide with real Slack ids, and narrows the queue to
+    the fixture channel through the palette, so no assertion depends on what
+    the live workspace happens to contain. Fixtures are re-seeded before each
+    test and deleted afterwards; the real ingested rows were re-counted after
+    the run and are unchanged (8 messages / 13 conversations / 11 users, 6 of
+    the messages still `source=EVENT`).
+  - It skips with a clear message if no `SlackInstallation` exists, since a
+    channel mention cannot be attributed without an authed user.
+- **#2 Keyboard checklist.** `j`/`k`/`Enter`/`e`/`Esc`/`⌘K` plus `u` and `g`/`G`
+  all verified by driving a real browser; the first six are also asserted in the
+  committed e2e suite. See the handoff notes for the item-by-item table.
+- **#3 Design check** — see "Honest assessment" below.
+- `npm run test` → **13 files / 258 tests** (up from 8/126). `npx tsc --noEmit`,
+  `npm run lint`, `npm run build` all clean.
+
+**One real bug found while verifying:** the done write is optimistic, so every
+post-`e` assertion passed from client state while the server action was still
+in flight — and `page.reload()` **aborted the request**, losing the write. The
+first e2e run caught it (`expected 6, received 7` after reload). The fix is not
+a test-only wait: the UI now tracks in-flight and server-confirmed saves,
+renders a "Saving…" indicator, and exposes both counts as data attributes so
+the test has a real sync point. A user navigating away mid-save had the same
+silent-loss problem.
+
+**Deliberately NOT done here** (later phases own these): no classification,
+urgency sort or bump collapsing (Phase 3); no view builder or saved views
+(Phase 4) — the palette scopes the queue to a channel/person, which is what
+plan.md asks of it, and `PaletteEntry.kind` already has a slot for views; no
+reply box (Phase 5); no snooze (Phase 6). `r` and `h` are deliberately left
+unbound so those phases can claim them without changing an existing meaning.
+
+**Honest assessment of the "one click+read to triage" design check:** it holds
+for the common case and I believe the claim, with one caveat.
+- The reading pane always shows the *full* body of the selected message, so
+  selecting is reading — there is no click between "see it in the list" and
+  "know what it says". `e` then triages it and the next item slides under the
+  cursor. Steady-state triage is `e e e` with `j` only to skip. Zero clicks.
+- `Enter` is not needed to read; it only moves DOM focus into the pane so
+  space/PgDn scroll a long message. That is the honest reason it exists.
+- **The caveat:** a thread parent shows its replies inline, but a message that
+  is *itself* a reply shows only itself — you cannot see the rest of that
+  thread without going to Slack. With zero threads in the connected workspace
+  this is untested against real data (the coverage is seeded fixtures). It is
+  the most likely place the claim breaks in practice, and it is worth fixing in
+  Phase 3 or 5 when thread context matters more.
+- Also unquantified: nothing here is smart yet, so "one read to triage" assumes
+  the queue is short. The claim is about interaction cost per message, not
+  about the queue being the right length. That is Phase 3's job.
+
+**Phase 1 follow-up not attempted:** Phase 1 suggested spot-checking the edit /
+delete / reaction paths against live Slack during this phase. That was not
+done — it needs a live Socket Mode session and manual Slack interaction, and it
+audits Phase 1's ingestion rather than Phase 2's UI. The UI renders `isEdited`,
+`reactions` and filters `isDeleted`, all fixture-tested; the live gap Phase 1
+recorded is still open.
 
 **Tasks:**
 - Single unified queue view merging DMs + mentions + threads, sorted by

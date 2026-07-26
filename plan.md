@@ -594,8 +594,8 @@ dimensions available as filters.
 ---
 
 ## Phase 5: Reply & Compose
-**Status:** In progress — code complete, 2 of 3 verification items pass. **The
-live send has not been run.** Do not record Phase 5 as Done until it has.
+**Status:** Done — all three verification items pass, including the live send
+(completed 2026-07-26).
 
 **Verified 2026-07-26:**
 - `npm run test` → **448 tests / 20 files** (was 387/17); `npx tsc --noEmit`,
@@ -613,14 +613,23 @@ live send has not been run.** Do not record Phase 5 as Done until it has.
   makes them send it twice.
 - 14 more tests over `send.ts` (thread routing, `ok:false`, missing `ts`).
 
-**NOT yet run — Phase 5 is not Done until this passes:**
-1. **Live send.** plan.md: "reply to a test DM from the queue, confirm message
-   appears in actual Slack workspace, confirm item auto-marked done." The test
-   exists (`e2e/reply.spec.ts`, "sending for real") but is **opt-in**: it runs
-   only with `SLACKZERO_E2E_LIVE_SEND=1`, because it posts a real message into
-   the connected workspace. A suite that messages a colleague every time someone
-   types `npm run test:e2e` is a hazard, not a test. The user opted to send one
-   by hand instead; as of this commit that has not happened.
+**Live send — PASSED 2026-07-26 (verification #1):**
+A reply was sent by hand from `/inbox` and confirmed from three directions:
+- **It reached Slack.** `conversations.history` on `D0BKMJLRRNH` shows
+  `"yes i am there, hello"` from the authed user `U0BK9FR4Y1M`, ts
+  `1785085914.137779`.
+- **The item was auto-marked done.** `"you there?"` has `isDone: true`,
+  `doneAt 17:11:54.141` — **4ms after** the message's own Slack timestamp of
+  `17:11:54.137`. That gap is the proof the designed order held: send first,
+  then mark done. Had it been the other way round, a failed send would have
+  silently removed the item from the queue.
+- **The round trip closed.** The reply was ingested back over Socket Mode
+  (outgoing message count went 0 → 1), so the write path and the read path agree.
+
+The automated version of this check lives in `e2e/reply.spec.ts` ("sending for
+real") and remains **opt-in** behind `SLACKZERO_E2E_LIVE_SEND=1`, because it
+posts a real message into the connected workspace. A suite that messages a
+colleague every time someone types `npm run test:e2e` is a hazard, not a test.
 
 **Deliberate deviation from the task list:**
 plan.md asks for AI drafts with "one-key accept and send". Clicking a draft

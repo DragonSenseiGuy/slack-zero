@@ -73,22 +73,23 @@ edit or reaction ever arrived.
 **How to close it:** with `npm run socket` running, edit a DM in Slack and add a
 reaction to it, then check `isEdited` / `reactions` on that row.
 
-## 5. Phase 5's live send has never been run
+## 5. The live send is verified, but only once, by hand
 
-**What happens:** the reply path is covered by 60 unit tests, including the
-failure path that matters most (a rejected send must not mark the item done).
-But an actual reply has never been posted to Slack from the app.
+**Status: closed, with a caveat.** A reply was sent from `/inbox` on 2026-07-26
+and confirmed in Slack, with the item auto-marked done 4ms later — see Phase 5 in
+`plan.md`.
 
-**How to close it:** either send one by hand from `/inbox`, or run the gated
-test:
+The caveat is that this is not part of the routine suite. The automated version
+is **opt-in**, because it posts a real message into the connected workspace:
 
 ```bash
 SLACKZERO_E2E_LIVE_SEND=1 npm run test:e2e -- e2e/reply.spec.ts
 ```
 
-It is opt-in because it posts a real message into the connected workspace. A
-suite that messages a colleague on every `npm run test:e2e` is a hazard, not a
-test.
+A suite that messages a colleague on every `npm run test:e2e` is a hazard, not a
+test. So the send path is guarded day-to-day by 60 unit tests (including the
+failure path) rather than by a live call. Run the gated test after touching
+anything in `src/lib/reply/`.
 
 ## 6. The workspace has almost no data, so quality claims are thin
 

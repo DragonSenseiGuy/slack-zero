@@ -11,6 +11,8 @@
 
 # next.js
 /.next/
+# e2e build output — kept separate so it cannot clobber a running dev server
+/.next-e2e/
 /out/
 
 # production

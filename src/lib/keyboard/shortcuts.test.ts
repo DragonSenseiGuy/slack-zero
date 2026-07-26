@@ -81,16 +81,32 @@ describe('resolveShortcut — list mode', () => {
   });
 
   it('ignores unbound keys', () => {
-    for (const unbound of ['a', 'z', '1', 'F5', 'Tab', 'r', 'h']) {
+    for (const unbound of ['a', 'z', '1', 'F5', 'Tab', 'h']) {
       expect(resolveShortcut(key(unbound), inMode('list'))).toBeNull();
     }
   });
 
-  it('does not claim shortcuts reserved for later phases', () => {
-    // `r` is Phase 5 (reply) and `h` is Phase 6 (snooze). Binding them now
-    // would mean two different behaviours for the same key across phases.
-    expect(resolveShortcut(key('r'), inMode('list'))).toBeNull();
+  it('binds the Phase 5 reply keys', () => {
+    // Phase 2 left `r` and `d` deliberately unbound and asserted it, so that a
+    // key could not mean two different things across phases. Phase 5 is the
+    // phase that claims them, so the guard moves rather than disappears.
+    expect(resolveShortcut(key('r'), inMode('list'))).toEqual({
+      type: 'focusReply',
+    });
+    expect(resolveShortcut(key('d'), inMode('list'))).toEqual({
+      type: 'draftReply',
+    });
+  });
+
+  it('still does not claim shortcuts reserved for later phases', () => {
+    // `h` is Phase 6 (snooze).
     expect(resolveShortcut(key('h'), inMode('list'))).toBeNull();
+  });
+
+  it('stands the reply keys down while the user is typing', () => {
+    // Otherwise typing "read" into the compose box would fire `r` and `d`.
+    expect(resolveShortcut(key('r'), { mode: 'list', isTyping: true })).toBeNull();
+    expect(resolveShortcut(key('d'), { mode: 'list', isTyping: true })).toBeNull();
   });
 });
 

@@ -20,6 +20,7 @@
     "backfill:verify": "tsx scripts/verify-backfill.ts",
     "classify": "tsx scripts/classify.ts",
     "triage:eval": "tsx scripts/triage-eval.ts",
+    "draft:eval": "tsx scripts/draft-eval.ts",
     "socket": "tsx scripts/socket.ts",
     "postinstall": "prisma generate"
   },

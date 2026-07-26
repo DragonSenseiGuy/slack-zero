@@ -31,7 +31,11 @@ export type InboxAction =
   | { type: 'palettePick' }
   | { type: 'toggleShowDone' }
   /** Switch between sort-by-urgency and sort-by-recency (Phase 3). */
-  | { type: 'cycleSort' };
+  | { type: 'cycleSort' }
+  /** Ask the model for reply suggestions (Phase 5). */
+  | { type: 'draftReply' }
+  /** Put the cursor in the reply box (Phase 5). */
+  | { type: 'focusReply' };
 
 /**
  * The parts of a `KeyboardEvent` this module reads. Declared structurally so
@@ -137,6 +141,10 @@ export function resolveShortcut(
       return { type: 'toggleShowDone' };
     case 's':
       return { type: 'cycleSort' };
+    case 'd':
+      return { type: 'draftReply' };
+    case 'r':
+      return { type: 'focusReply' };
     default:
       return null;
   }
@@ -173,4 +181,6 @@ export const SHORTCUT_HELP: ReadonlyArray<{ keys: string; description: string }>
     { keys: 's', description: 'Sort by urgency / recency' },
     { keys: 'u', description: 'Show or hide done items' },
     { keys: 'g / G', description: 'First / last message' },
+    { keys: 'r', description: 'Reply' },
+    { keys: 'd', description: 'Suggest replies' },
   ];

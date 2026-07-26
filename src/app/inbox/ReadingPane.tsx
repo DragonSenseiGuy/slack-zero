@@ -104,10 +104,20 @@ export type ReadingPaneProps = {
   nowIso: string;
   isFocused: boolean;
   onToggleDone: (item: QueueItem) => void;
+  /**
+   * The reply box (Phase 5), passed in rather than built here.
+   *
+   * Keeps the pane a pure renderer of a message: sending state, drafts and
+   * rollback all live with the rest of the mutation logic in `InboxClient`.
+   */
+  replySlot?: React.ReactNode;
 };
 
 export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
-  function ReadingPane({ item, nowIso, isFocused, onToggleDone }, ref) {
+  function ReadingPane(
+    { item, nowIso, isFocused, onToggleDone, replySlot },
+    ref,
+  ) {
     const localTime = useLocalTimestamp(item?.sentAtIso ?? '');
 
     if (!item) {
@@ -134,7 +144,7 @@ export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
         data-testid="reading-pane"
         data-message-id={item.id}
         data-focused={isFocused ? 'true' : 'false'}
-        className={`h-full overflow-y-auto outline-none ${
+        className={`flex h-full min-h-0 flex-col outline-none ${
           isFocused ? 'ring-2 ring-inset ring-violet-400' : ''
         }`}
       >
@@ -177,8 +187,9 @@ export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
           </div>
         </header>
 
-        <div className="max-w-3xl px-6 py-5">
-          <TriageExplainer item={item} nowIso={nowIso} />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="max-w-3xl px-6 py-5">
+            <TriageExplainer item={item} nowIso={nowIso} />
 
           <p
             className="whitespace-pre-wrap break-words text-[15px] leading-relaxed text-neutral-800"
@@ -228,7 +239,10 @@ export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
               </ol>
             </div>
           ) : null}
+          </div>
         </div>
+
+        {replySlot}
       </section>
     );
   },

@@ -594,7 +594,66 @@ dimensions available as filters.
 ---
 
 ## Phase 5: Reply & Compose
-**Status:** Not started
+**Status:** In progress — code complete, 2 of 3 verification items pass. **The
+live send has not been run.** Do not record Phase 5 as Done until it has.
+
+**Verified 2026-07-26:**
+- `npm run test` → **448 tests / 20 files** (was 387/17); `npx tsc --noEmit`,
+  `npm run lint`, `npm run build` clean; `npm run test:e2e` → **24 passed,
+  1 skipped** (the skip is the live send, see below).
+- **Draft prompt/response parsing (verification #2):** 30 unit tests. The parser
+  skips individual malformed drafts and throws only when nothing usable
+  survives — offering two of three beats offering none.
+- **Failure path (verification #3):** 15 unit tests in
+  `src/lib/reply/actions.test.ts`. The central one asserts that when Slack
+  rejects the send, the error surfaces and `MessageState` is **never** written.
+  Covered alongside it: rate limiting, an empty reply, a deleted message, a DB
+  failure, and the mirror case — once the reply is really in Slack, a failed
+  done-write must still report success, because telling the user the send failed
+  makes them send it twice.
+- 14 more tests over `send.ts` (thread routing, `ok:false`, missing `ts`).
+
+**NOT yet run — Phase 5 is not Done until this passes:**
+1. **Live send.** plan.md: "reply to a test DM from the queue, confirm message
+   appears in actual Slack workspace, confirm item auto-marked done." The test
+   exists (`e2e/reply.spec.ts`, "sending for real") but is **opt-in**: it runs
+   only with `SLACKZERO_E2E_LIVE_SEND=1`, because it posts a real message into
+   the connected workspace. A suite that messages a colleague every time someone
+   types `npm run test:e2e` is a hazard, not a test. The user opted to send one
+   by hand instead; as of this commit that has not happened.
+
+**Deliberate deviation from the task list:**
+plan.md asks for AI drafts with "one-key accept and send". Clicking a draft
+**fills the compose box; it does not send.** Live testing (`npm run draft:eval`)
+showed the model inventing specifics that would be one keystroke from a
+colleague — it produced `"Approved the staging access request."` (a flat claim
+that an action already happened) and `"How about 10 AM tomorrow?"` (a time
+invented from nothing). Tightening the system prompt fixed both — it now
+requires approval be phrased as an intention and a missing detail be left as a
+`[time]`/`[date]` blank — and `hasPlaceholder()` flags any remaining blank so the
+UI can mark that draft as needing an edit. But a small model that has
+demonstrably invented facts once should not have a one-key path to sending, so
+the accept step stops at the box. Revisit if a future model earns it.
+
+**Findings:**
+- **Tightening the prompt caused truncation.** More rules to weigh means more
+  hidden reasoning, and `DRAFT_MAX_TOKENS: 1600` started returning
+  `finish_reason: 'length'` with zero content. Raised to **3000** and confirmed
+  clean over two full `draft:eval` runs. This is the Phase 0 trap again: anyone
+  editing the drafting prompt must re-run `npm run draft:eval` and expect to move
+  that number with it.
+- **The e2e suite was silently breaking the dev server.** Playwright's
+  `webServer` ran `next build && next start` into the same `.next` a running
+  `npm run dev` serves from, so after any e2e run the dev server 404'd its own
+  stylesheet and rendered completely unstyled — which reads as a broken app, not
+  a clobbered build directory. The e2e build now goes to `.next-e2e` via
+  `NEXT_DIST_DIR` (`next.config.mjs`, `playwright.config.ts`, gitignored), and
+  the fix was verified by running the full suite and re-checking that the dev
+  server's CSS survived it. This had been true since the first e2e run of the
+  session.
+- `r` and `d` were left unbound in Phase 2 with a test asserting it, so a key
+  could not mean two things across phases. Phase 5 claims them, so that guard was
+  moved rather than deleted — `h` is still reserved for Phase 6.
 
 **Objective:** Respond to Slack messages without leaving the queue.
 

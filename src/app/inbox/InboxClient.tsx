@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { CommandPalette } from '@/app/inbox/CommandPalette';
+import { ReplyBox } from '@/app/inbox/ReplyBox';
 import { ViewBuilder } from '@/app/inbox/ViewBuilder';
 import { ViewSidebar } from '@/app/inbox/ViewSidebar';
 import { Kbd, QueueList } from '@/app/inbox/QueueList';
@@ -17,6 +18,8 @@ import {
 import type { PaletteEntry } from '@/lib/palette/search';
 import { filterPaletteEntries } from '@/lib/palette/search';
 import { setMessageDone } from '@/lib/queue/actions';
+import { draftReplies, sendReplyToMessage } from '@/lib/reply/actions';
+import type { ReplyDraft } from '@/lib/reply/draft';
 import { createView, deleteView, updateView } from '@/lib/views/actions';
 import {
   applyViewFilters,
@@ -113,6 +116,23 @@ export function InboxClient({
    */
   const [pendingSaves, setPendingSaves] = useState(0);
   const [confirmedSaves, setConfirmedSaves] = useState(0);
+
+  /**
+   * Reply state (plan.md, Phase 5).
+   *
+   * `sentTs` and `replyError` are keyed by nothing — they are about the *current*
+   * selection, and are cleared when it changes, because a success or failure
+   * notice that outlived its message would be attached to the wrong person.
+   */
+  const [replySending, setReplySending] = useState(false);
+  const [replyError, setReplyError] = useState<string | null>(null);
+  const [replySentTs, setReplySentTs] = useState<string | null>(null);
+  const [replySentCount, setReplySentCount] = useState(0);
+  /** Auto-mark done after sending. plan.md: configurable, on by default. */
+  const [replyMarkDone, setReplyMarkDone] = useState(true);
+  const [drafts, setDrafts] = useState<ReplyDraft[]>([]);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [draftsError, setDraftsError] = useState<string | null>(null);
 
   const paneRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -341,6 +361,97 @@ export function InboxClient({
     [],
   );
 
+  /**
+   * Send a reply, then optionally mark the item done.
+   *
+   * Deliberately *not* optimistic about the send itself. Everywhere else in this
+   * app an optimistic update is right, because the worst case is a local flag
+   * that rolls back. Here the worst case is the user believing a colleague got a
+   * message that never left the building — so the button says "Sending…" and the
+   * item stays put until Slack confirms.
+   *
+   * The done flag, once the send succeeds, *is* applied locally straight away:
+   * the server has already written it, and re-fetching just to see it would make
+   * a successful reply feel slow.
+   */
+  const sendReply = useCallback(
+    (text: string) => {
+      const target = selectedItem;
+      if (!target) return;
+
+      setReplySending(true);
+      setReplyError(null);
+      setReplySentTs(null);
+
+      void sendReplyToMessage(target.id, text, { markDone: replyMarkDone })
+        .then((result) => {
+          if (!result.ok) {
+            // No rollback needed: nothing was changed optimistically. The item
+            // stays in the queue, which is the correct place for a message that
+            // still has not been answered.
+            setReplyError(result.error);
+            return;
+          }
+
+          setReplySentTs(result.ts);
+          setReplySentCount((count) => count + 1);
+          setDrafts([]);
+          setDraftsError(null);
+
+          if (result.markedDone) {
+            setOverrides((current) => ({
+              ...current,
+              [target.id]: {
+                isDone: true,
+                doneAtIso: new Date().toISOString(),
+              },
+            }));
+          } else if (replyMarkDone) {
+            // Sent, but the done write did not land. Say so rather than leaving
+            // the user to wonder why the item is still there.
+            setReplyError(
+              'Reply sent, but the item could not be marked done. It is still in the queue.',
+            );
+          }
+        })
+        .catch((cause: unknown) => {
+          setReplyError(
+            cause instanceof Error
+              ? `Could not send the reply: ${cause.message}`
+              : 'Could not send the reply.',
+          );
+        })
+        .finally(() => setReplySending(false));
+    },
+    [selectedItem, replyMarkDone],
+  );
+
+  const requestDrafts = useCallback(() => {
+    const target = selectedItem;
+    if (!target) return;
+
+    setDraftsLoading(true);
+    setDraftsError(null);
+
+    void draftReplies(target.id)
+      .then((result) => {
+        if (!result.ok) {
+          // Drafts are a convenience, never a prerequisite for replying — a
+          // failure here must not disturb the compose box.
+          setDraftsError(result.error);
+          setDrafts([]);
+          return;
+        }
+        setDrafts(result.drafts);
+      })
+      .catch((cause: unknown) => {
+        setDraftsError(
+          cause instanceof Error ? cause.message : 'Could not draft a reply.',
+        );
+      })
+      .finally(() => setDraftsLoading(false));
+  }, [selectedItem]);
+
   const openSelected = useCallback(() => {
     if (!selectedItem) return;
     setMode('reading');
@@ -454,6 +565,20 @@ export function InboxClient({
           setSortMode(nextSortMode);
           setSelectedIndex(0);
           break;
+
+        case 'draftReply':
+          requestDrafts();
+          break;
+
+        case 'focusReply': {
+          // `r` is a shortcut *into* the compose box; the box itself then owns
+          // the keyboard, since `isTypingTarget` stands the shortcuts down.
+          const input = document.querySelector<HTMLTextAreaElement>(
+            '[data-testid="reply-input"]',
+          );
+          input?.focus();
+          break;
+        }
       }
     }
 
@@ -471,6 +596,7 @@ export function InboxClient({
     goBack,
     closePalette,
     pickPaletteEntry,
+    requestDrafts,
   ]);
 
   // Keep the stored index in range when the list shrinks under the cursor
@@ -478,6 +604,15 @@ export function InboxClient({
   useEffect(() => {
     setSelectedIndex((current) => clampIndex(current, visibleItems.length));
   }, [visibleItems.length]);
+
+  // A sent/failed notice or a set of drafts belongs to one message. Carrying
+  // either to the next selection would attach it to the wrong person.
+  useEffect(() => {
+    setReplyError(null);
+    setReplySentTs(null);
+    setDrafts([]);
+    setDraftsError(null);
+  }, [selectedItem?.id]);
 
   // -------------------------------------------------------------------------
   // Render
@@ -619,6 +754,8 @@ export function InboxClient({
           data-confirmed-saves={confirmedSaves}
           data-sort-mode={sortMode}
           data-active-view={activeView?.name ?? ''}
+          data-replies-sent={replySentCount}
+          data-reply-sending={replySending ? 'true' : 'false'}
           className="w-full max-w-md shrink-0 overflow-y-auto border-r border-neutral-200 outline-none"
         >
           <QueueList
@@ -644,6 +781,24 @@ export function InboxClient({
             nowIso={nowIso}
             isFocused={mode === 'reading'}
             onToggleDone={toggleDone}
+            replySlot={
+              selectedItem && isConnected ? (
+                <ReplyBox
+                  item={selectedItem}
+                  drafts={drafts}
+                  draftsLoading={draftsLoading}
+                  draftsError={draftsError}
+                  sending={replySending}
+                  error={replyError}
+                  sentTs={replySentTs}
+                  markDone={replyMarkDone}
+                  onMarkDoneChange={setReplyMarkDone}
+                  onSend={sendReply}
+                  onRequestDrafts={requestDrafts}
+                  onDismissError={() => setReplyError(null)}
+                />
+              ) : null
+            }
           />
         </div>
       </div>

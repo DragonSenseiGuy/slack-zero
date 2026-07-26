@@ -221,6 +221,38 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
   });
 }
 
+/**
+ * A real (non-fixture) DM that already has a message in it, or null.
+ *
+ * Only the live-send reply test uses this. Every other suite asserts against
+ * seeded fixtures, but "confirm the message appears in the actual Slack
+ * workspace" cannot be done against a synthetic conversation id — Slack would
+ * reject the post with `channel_not_found`.
+ */
+export async function findRealDirectMessage(): Promise<{
+  messageId: string;
+  conversationId: string;
+} | null> {
+  const message = await prisma.message.findFirst({
+    where: {
+      isDeleted: false,
+      conversation: { kind: 'IM', id: { not: { startsWith: 'DE2E' } } },
+      id: { not: { startsWith: 'me2e' } },
+    },
+    orderBy: { sentAt: 'desc' },
+    select: { id: true, conversationId: true },
+  });
+
+  return message
+    ? { messageId: message.id, conversationId: message.conversationId }
+    : null;
+}
+
+/** Clear our done flag for one message, so a live test starts from a known state. */
+export async function clearDoneState(messageId: string): Promise<void> {
+  await prisma.messageState.deleteMany({ where: { messageId } });
+}
+
 export async function disconnectFixtures(): Promise<void> {
   await prisma.$disconnect();
 }

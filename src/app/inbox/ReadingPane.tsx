@@ -3,8 +3,10 @@
 import { forwardRef, useEffect, useState } from 'react';
 
 import type { QueueItem } from '@/lib/queue/queue';
-import { formatRelativeTime } from '@/lib/queue/time';
+import { effectiveUrgency } from '@/lib/queue/queue';
+import { bumpStalenessLabel, formatRelativeTime } from '@/lib/queue/time';
 import { Kbd } from '@/app/inbox/QueueList';
+import { CategoryBadge, UrgencyBadge } from '@/app/inbox/TriageBadges';
 
 /**
  * The reading pane of the split view: full content of the selected message
@@ -33,6 +35,68 @@ function useLocalTimestamp(iso: string): string | null {
   }, [iso]);
 
   return label;
+}
+
+/**
+ * Why this message is where it is in the queue.
+ *
+ * CLAUDE.md requires the model's `reason` be stored alongside every score
+ * "for debugging and building trust in the sorting, not optional metadata".
+ * Storing it and never showing it would satisfy the letter and miss the point,
+ * so it is rendered here, with the model that produced it — a score you cannot
+ * argue with is a score you cannot trust.
+ */
+function TriageExplainer({ item, nowIso }: { item: QueueItem; nowIso: string }) {
+  const urgency = effectiveUrgency(item);
+
+  if (!item.triage) {
+    return (
+      <p
+        data-testid="triage-explainer"
+        data-classified="false"
+        className="mb-4 rounded border border-dashed border-neutral-300 px-3 py-2 text-xs text-neutral-500"
+      >
+        Not classified yet. Triage runs after ingestion, never during it — run{' '}
+        <code className="font-mono">npm run classify</code> to catch up.
+      </p>
+    );
+  }
+
+  return (
+    <div
+      data-testid="triage-explainer"
+      data-classified="true"
+      className="mb-4 rounded border border-neutral-200 bg-neutral-50 px-3 py-2"
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        {urgency !== null ? <UrgencyBadge score={urgency} /> : null}
+        <CategoryBadge category={item.triage.category} />
+        <span className="font-mono text-[10px] text-neutral-400">
+          urgency {item.triage.urgencyScore}/100
+        </span>
+      </div>
+
+      <p
+        className="mt-1.5 text-xs text-neutral-700"
+        data-testid="triage-reason"
+      >
+        {item.triage.reason}
+      </p>
+
+      {item.bumps ? (
+        <p className="mt-1 text-xs text-fuchsia-800" data-testid="triage-bump-note">
+          Collapsed {item.bumps.bumpCount}{' '}
+          {item.bumps.bumpCount === 1 ? 'follow-up' : 'follow-ups'} —{' '}
+          {bumpStalenessLabel(item.bumps.firstAskedAtIso, nowIso)}, last chased{' '}
+          {formatRelativeTime(item.bumps.lastBumpedAtIso, nowIso)} ago.
+        </p>
+      ) : null}
+
+      <p className="mt-1 font-mono text-[10px] text-neutral-400">
+        {item.triage.model}
+      </p>
+    </div>
+  );
 }
 
 export type ReadingPaneProps = {
@@ -114,6 +178,8 @@ export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
         </header>
 
         <div className="max-w-3xl px-6 py-5">
+          <TriageExplainer item={item} nowIso={nowIso} />
+
           <p
             className="whitespace-pre-wrap break-words text-[15px] leading-relaxed text-neutral-800"
             data-testid="reading-pane-body"

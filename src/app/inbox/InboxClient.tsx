@@ -19,9 +19,14 @@ import {
   applyQueueFilters,
   clampIndex,
   moveSelection,
+  nextSortMode,
   queueCounts,
+  sortQueue,
+  unclassifiedCount,
+  SORT_MODE_LABEL,
   type QueueItem,
   type QueueScope,
+  type QueueSortMode,
 } from '@/lib/queue/queue';
 
 /**
@@ -59,6 +64,13 @@ export function InboxClient({
   const [paletteQuery, setPaletteQuery] = useState('');
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [showDone, setShowDone] = useState(false);
+  /**
+   * Urgency is the default because prioritization is the product (plan.md,
+   * Phase 3). `s` switches to recency, where a collapsed bump chain sorts at
+   * the time of the *original* ask — which is the whole point of collapsing:
+   * a chase surfaces staleness instead of looking like new activity.
+   */
+  const [sortMode, setSortMode] = useState<QueueSortMode>('urgency');
   const [scope, setScope] = useState<QueueScope | null>(null);
   const [overrides, setOverrides] = useState<Record<string, DoneOverride>>({});
   const [error, setError] = useState<string | null>(null);
@@ -94,13 +106,25 @@ export function InboxClient({
   );
 
   const visibleItems = useMemo(
-    () => applyQueueFilters(effectiveItems, { includeDone: showDone, scope }),
-    [effectiveItems, showDone, scope],
+    () =>
+      // Filter first, then collapse and sort. Collapsing after filtering is
+      // what lets a chain whose original ask is already done still show up
+      // under its oldest surviving follow-up rather than disappearing.
+      sortQueue(
+        applyQueueFilters(effectiveItems, { includeDone: showDone, scope }),
+        { mode: sortMode },
+      ),
+    [effectiveItems, showDone, scope, sortMode],
   );
 
   const counts = useMemo(
     () => queueCounts(effectiveItems, scope),
     [effectiveItems, scope],
+  );
+
+  const pendingTriage = useMemo(
+    () => unclassifiedCount(visibleItems),
+    [visibleItems],
   );
 
   const safeIndex = clampIndex(selectedIndex, visibleItems.length);
@@ -271,6 +295,11 @@ export function InboxClient({
           setShowDone((current) => !current);
           setSelectedIndex(0);
           break;
+
+        case 'cycleSort':
+          setSortMode(nextSortMode);
+          setSelectedIndex(0);
+          break;
       }
     }
 
@@ -331,7 +360,29 @@ export function InboxClient({
           </button>
         ) : null}
 
+        {pendingTriage > 0 ? (
+          <span
+            className="rounded-full border border-dashed border-neutral-300 px-2 py-0.5 text-xs text-neutral-500"
+            data-testid="pending-triage"
+            title="Classification runs after ingestion, never during it. Run `npm run classify` to catch up."
+          >
+            {pendingTriage} unrated
+          </span>
+        ) : null}
+
         <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setSortMode(nextSortMode);
+              setSelectedIndex(0);
+            }}
+            data-testid="sort-mode-toggle"
+            data-sort-mode={sortMode}
+            className="rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50"
+          >
+            Sort: {SORT_MODE_LABEL[sortMode]} <Kbd>s</Kbd>
+          </button>
           {pendingSaves > 0 ? (
             <span className="text-xs text-neutral-400" data-testid="saving-indicator">
               Saving…
@@ -395,12 +446,14 @@ export function InboxClient({
           data-hydrated={isHydrated ? 'true' : 'false'}
           data-pending-saves={pendingSaves}
           data-confirmed-saves={confirmedSaves}
+          data-sort-mode={sortMode}
           className="w-full max-w-md shrink-0 overflow-y-auto border-r border-neutral-200 outline-none"
         >
           <QueueList
             items={visibleItems}
             selectedIndex={safeIndex}
             nowIso={nowIso}
+            showDayBuckets={sortMode === 'recency'}
             onSelect={setSelectedIndex}
             onOpen={(index) => {
               setSelectedIndex(index);

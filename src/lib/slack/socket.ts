@@ -8,6 +8,10 @@ import {
 } from '@/lib/slack/ingest';
 import { normalizeMessageEvent } from '@/lib/slack/normalize';
 import type { RawReactionEvent, RawSlackMessage } from '@/lib/slack/raw';
+import {
+  configureClassificationScheduler,
+  scheduleClassificationForSlackMessage,
+} from '@/lib/triage/scheduler';
 
 /**
  * Socket Mode listener: keeps the DB fresh without polling.
@@ -134,6 +138,8 @@ export async function startSocketModeListener(
 
   if (!appToken) throw new SocketModeNotConfiguredError();
 
+  configureClassificationScheduler({ onLog: log });
+
   const socket = new SocketModeClient({ appToken });
 
   /**
@@ -149,6 +155,16 @@ export async function startSocketModeListener(
       try {
         const result = await handler(event);
         options.onIngest?.(result);
+
+        // Phase 3: hand a newly ingested message to the triage engine — after
+        // it is already committed, and without awaiting. CLAUDE.md requires
+        // classification never block ingestion, so this call is deliberately
+        // fire-and-forget and lives in the wiring rather than inside
+        // `handleMessageEvent`, which stays a pure ingest path.
+        if (result.action === 'created') {
+          scheduleClassificationForSlackMessage(result.conversationId, result.ts);
+        }
+
         log(
           result.action === 'ignored'
             ? `ignored: ${result.reason}`

@@ -430,15 +430,23 @@ recorded is still open.
 ---
 
 ## Phase 3: AI Triage Engine
-**Status:** Not started
+**Status:** Done — all three verification items pass. See "Findings" below; the
+headline one is that **urgency scores are not reproducible at `temperature: 0`**
+(±20 points run to run), while category and `is_bump` are.
 
-**Objective:** Urgency scoring and action/misc classification via Claude.
+**Objective:** Urgency scoring and action/misc classification via the
+Hack Club AI proxy.
 
 **Tasks:**
-- Classification pipeline: for each ingested message, call Anthropic API to
+- Classification pipeline: for each ingested message, call **Hack Club AI**
+  (`qwen/qwen3-32b` via `src/lib/llm/client.ts`) to
   produce: `urgency_score` (0-100), `category` (action_needed | misc |
   fyi), `is_bump` (bool, references original message if detected), `reason`
   (short explanation, for debugging/trust)
+  *(This bullet previously said "call Anthropic API" — stale wording from before
+  the 2026-07-24 decision to use Hack Club AI with a small open-weight model for
+  per-message work. CLAUDE.md and the Architecture section above are the
+  authority; corrected here in Phase 3.)*
 - Batch classification on ingestion (don't block the ingestion pipeline —
   queue it async)
 - Bump detection logic: identify "any update on this?" style follow-ups,
@@ -456,6 +464,52 @@ recorded is still open.
   action_needed messages are actually action-needed (no automated way to
   fully verify AI judgment, so this is a human review step — log results in
   the PR)
+
+**Verified 2026-07-26** (`qwen/qwen3-32b` via Hack Club AI):
+- `npm run test` → **348 tests / 16 files** (was 274/13). `npx tsc --noEmit`,
+  `npm run lint`, `npm run build` clean; `npm run test:e2e` **10/10**.
+- **Bump collapsing (verification #2):** a 3-message chain collapses to exactly
+  1 row, the survivor is the *original ask* keeping its own timestamp, and
+  `bumpStalenessLabel` renders the literal `"first asked 5 days ago"` that
+  plan.md asks for. Also covered: chase-of-a-chase, model-invented cycles,
+  peak-urgency propagation, and the case where the original is gone (oldest
+  survivor stands in rather than the chain vanishing).
+- **Labeled-set accuracy (verification #1):** 20 hand-labeled fixtures, 18
+  unambiguous. Category **17/18 (94%)**, `is_bump` **18/18 (100%)**.
+  `npm run triage:eval` runs them against the live model; `fixtures.test.ts`
+  scores committed recordings so `npm run test` stays offline.
+- **Real-data spot-check (verification #3):** all 8 ingested messages
+  classified, 0 failed, 8 requests used of the 450/30min budget. Every row
+  stored a non-empty `reason`. Judgements were defensible: greetings/"yolo"/
+  "testing" → `misc` 0-10; `"you there?"` → `action_needed` 35; a bare
+  `@`-mention → `action_needed` 20.
+  **Caveat:** the workspace contains only greetings and test messages, so this
+  confirms the pipeline runs end to end without producing nonsense — it does
+  **not** validate `action_needed` detection on substantive content. The fixture
+  set carries that weight until there is real traffic.
+
+**Findings:**
+1. **Urgency is not reproducible; category and `is_bump` are.** Across three
+   full live runs of the same 20 fixtures at `temperature: 0`, every category
+   and every `is_bump` was identical, but urgency moved by up to 20 points
+   (`prod-outage` 70/85/90, `bump-gentle-ping` 50/70/70). This matters beyond
+   test flakiness: the display bands in `types.ts` have hard edges (80 = "Now"),
+   so a message can change band between runs without its content changing.
+   CLAUDE.md anticipates this ("urgency score can have some tolerance, category
+   should not flip-flop"), so the suite gates category strictly and urgency with
+   a ±15 tolerance plus ordering invariants, while still *tracking* and printing
+   the exact-band rate.
+2. **The first set of committed recordings was not reproducible.** They scored
+   100%/100% offline, but re-running the same fixtures live scored 94%/61%, and
+   `urgent-word-but-social` had been recorded as `misc @ 5` while the live model
+   now says `fyi @ 30-50` consistently (5/5 on a repeat run). Recordings have
+   been refreshed from a real run so the offline number reflects real behaviour.
+   Anyone regenerating them should re-run `npm run triage:eval` rather than
+   trusting a stale capture.
+3. **The one genuine category miss is worth keeping:** `urgent-word-but-social`
+   ("URGENT: someone left a whole cake in the kitchen 🎂") is labeled `misc` but
+   the model calls it `fyi`. The label was not softened to make the suite pass —
+   the model is reading a joke as an announcement.
 
 ---
 

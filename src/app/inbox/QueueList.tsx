@@ -4,6 +4,7 @@ import { Fragment, useEffect, useRef } from 'react';
 
 import type { QueueItem, QueueReason } from '@/lib/queue/queue';
 import { formatDayBucket, formatRelativeTime } from '@/lib/queue/time';
+import { BumpBadge, TriageBadges } from '@/app/inbox/TriageBadges';
 
 /**
  * The queue list. One row per message: sender, preview, channel/DM context,
@@ -29,6 +30,12 @@ export type QueueListProps = {
   items: QueueItem[];
   selectedIndex: number;
   nowIso: string;
+  /**
+   * Day headers only make sense while the list is in time order. In urgency
+   * order they would read as "Today / Older / Today", which is worse than no
+   * headers at all.
+   */
+  showDayBuckets?: boolean;
   onSelect: (index: number) => void;
   onOpen: (index: number) => void;
   onToggleDone: (item: QueueItem) => void;
@@ -38,6 +45,7 @@ export function QueueList({
   items,
   selectedIndex,
   nowIso,
+  showDayBuckets = true,
   onSelect,
   onOpen,
   onToggleDone,
@@ -71,9 +79,11 @@ export function QueueList({
     <ul className="divide-y divide-neutral-200" data-testid="queue-list">
       {items.map((item, index) => {
         const isSelected = index === selectedIndex;
-        const bucket = formatDayBucket(item.sentAtIso, nowIso);
+        const bucket = showDayBuckets
+          ? formatDayBucket(item.sentAtIso, nowIso)
+          : '';
         const previousBucket =
-          index === 0
+          !showDayBuckets || index === 0
             ? null
             : formatDayBucket(items[index - 1].sentAtIso, nowIso);
 
@@ -138,6 +148,11 @@ export function QueueList({
                 >
                   {item.preview}
                 </p>
+
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  <TriageBadges item={item} />
+                  <BumpBadge item={item} nowIso={nowIso} />
+                </div>
 
                 <div className="mt-1 flex items-center gap-2 text-[11px] text-neutral-500">
                   <span className="truncate">{item.contextLabel}</span>

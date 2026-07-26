@@ -18,6 +18,8 @@
     "db:migrate": "prisma migrate dev",
     "backfill": "tsx scripts/backfill.ts",
     "backfill:verify": "tsx scripts/verify-backfill.ts",
+    "classify": "tsx scripts/classify.ts",
+    "triage:eval": "tsx scripts/triage-eval.ts",
     "socket": "tsx scripts/socket.ts",
     "postinstall": "prisma generate"
   },

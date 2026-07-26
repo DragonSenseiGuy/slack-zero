@@ -5,22 +5,30 @@ import {
   attachThreadReplies,
   buildQueue,
   clampIndex,
+  collapseBumpChains,
   compareByRecency,
+  compareByUrgency,
   contextLabelFor,
+  effectiveUrgency,
   matchesScope,
   moveSelection,
   nextSelectionAfterRemoval,
   queueCounts,
   queueReasonFor,
+  resolveBumpRoot,
   senderLabelFor,
+  sortQueue,
   threadKey,
   toQueueItem,
+  unclassifiedCount,
   userLabel,
   type QueueConversation,
   type QueueItem,
   type QueueMessageRow,
   type QueueUser,
 } from '@/lib/queue/queue';
+import { bumpStalenessLabel } from '@/lib/queue/time';
+import type { MessageTriage, TriageCategory } from '@/lib/triage/types';
 
 /**
  * Fixture-driven, no database and no live Slack. Ids follow the shapes Phase 1
@@ -121,6 +129,7 @@ function row(overrides: Partial<QueueMessageRow> = {}): QueueMessageRow {
     conversation,
     isDone: false,
     doneAt: null,
+    triage: null,
     ...overrides,
   };
 }
@@ -653,5 +662,244 @@ describe('selection arithmetic', () => {
 
   it('collapses to zero when the list empties', () => {
     expect(nextSelectionAfterRemoval(0, 0)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: bump collapsing and urgency sort
+// ---------------------------------------------------------------------------
+
+/**
+ * plan.md, Phase 3 verification: "a 3-message bump chain should appear as 1
+ * item showing 'first asked X days ago'". These are the tests for that claim.
+ */
+
+const NOW_ISO = '2026-07-25T12:00:00.000Z';
+
+function triage(overrides: Partial<MessageTriage> = {}): MessageTriage {
+  return {
+    urgencyScore: 50,
+    category: 'action_needed' as TriageCategory,
+    isBump: false,
+    bumpOfMessageId: null,
+    reason: 'asks you to do a thing',
+    model: 'qwen/qwen3-32b',
+    classifiedAtIso: NOW_ISO,
+    ...overrides,
+  };
+}
+
+/** A queue item at an explicit age, so staleness assertions are exact. */
+function item(
+  id: string,
+  daysAgo: number,
+  triageOverrides: Partial<MessageTriage> | null,
+  text = 'text',
+): QueueItem {
+  const sentAt = new Date(
+    Date.parse(NOW_ISO) - daysAgo * 24 * 60 * 60 * 1000,
+  );
+  return {
+    ...toQueueItem(
+      row({
+        id,
+        text,
+        sentAt,
+        ts: `${Math.floor(sentAt.getTime() / 1000)}.000100`,
+        triage: triageOverrides === null ? null : triage(triageOverrides),
+      }),
+      'dm',
+      USERS,
+      CONVERSATIONS,
+    ),
+    id,
+  };
+}
+
+describe('resolveBumpRoot', () => {
+  it('walks a chase-of-a-chase back to the original ask', () => {
+    const links = new Map([
+      ['bump2', 'bump1'],
+      ['bump1', 'original'],
+    ]);
+    expect(resolveBumpRoot('bump2', links)).toBe('original');
+    expect(resolveBumpRoot('original', links)).toBe('original');
+  });
+
+  it('does not hang on a cycle the model could invent', () => {
+    // A model is perfectly capable of claiming A bumps B and B bumps A.
+    const links = new Map([
+      ['a', 'b'],
+      ['b', 'a'],
+    ]);
+    expect(['a', 'b']).toContain(resolveBumpRoot('a', links));
+  });
+
+  it('stops at a link we do not hold rather than throwing', () => {
+    expect(resolveBumpRoot('x', new Map([['x', 'gone']]))).toBe('gone');
+  });
+});
+
+describe('collapseBumpChains', () => {
+  it('folds a 3-message bump chain into 1 item kept at the original ask', () => {
+    const original = item('original', 5, {}, 'can you review the migration?');
+    const bump1 = item('bump1', 2, { isBump: true, bumpOfMessageId: 'original' }, 'any update on this?');
+    const bump2 = item('bump2', 1, { isBump: true, bumpOfMessageId: 'bump1' }, 'gentle ping');
+
+    const collapsed = collapseBumpChains([bump2, bump1, original]);
+
+    expect(collapsed).toHaveLength(1);
+
+    const [only] = collapsed;
+    // The survivor is the original ask, not the latest chase — that is what
+    // makes the recency sort show staleness instead of treating a bump as new.
+    expect(only.id).toBe('original');
+    expect(only.body).toBe('can you review the migration?');
+    expect(only.bumps).not.toBeNull();
+    expect(only.bumps?.bumpCount).toBe(2);
+    expect(only.bumps?.bumpMessageIds).toEqual(['bump1', 'bump2']);
+    expect(only.bumps?.firstAskedAtIso).toBe(only.sentAtIso);
+  });
+
+  it('labels the collapsed row with how long the original has been waiting', () => {
+    const original = item('original', 5, {});
+    const bump1 = item('bump1', 2, { isBump: true, bumpOfMessageId: 'original' });
+    const bump2 = item('bump2', 1, { isBump: true, bumpOfMessageId: 'bump1' });
+
+    const [only] = collapseBumpChains([bump2, bump1, original]);
+    const summary = only.bumps;
+    if (!summary) throw new Error('expected a bump summary');
+
+    // The literal string plan.md asks for.
+    expect(bumpStalenessLabel(summary.firstAskedAtIso, NOW_ISO)).toBe(
+      'first asked 5 days ago',
+    );
+    // And the chase itself is recorded, so "bumped twice, last yesterday" is
+    // renderable without going back to the database.
+    expect(summary.lastBumpedAtIso).toBe(bump2.sentAtIso);
+  });
+
+  it('leaves an unrelated message alone', () => {
+    const original = item('original', 5, {});
+    const bump = item('bump', 2, { isBump: true, bumpOfMessageId: 'original' });
+    const unrelated = item('unrelated', 3, {});
+
+    const collapsed = collapseBumpChains([bump, unrelated, original]);
+
+    expect(collapsed).toHaveLength(2);
+    expect(collapsed.map((each) => each.id).sort()).toEqual([
+      'original',
+      'unrelated',
+    ]);
+    expect(
+      collapsed.find((each) => each.id === 'unrelated')?.bumps,
+    ).toBeNull();
+  });
+
+  it('carries the peak urgency of the chain, not just the original score', () => {
+    // The chase is where the urgency escalated ("this is blocking the release").
+    // Collapsing must not hide that behind the original's calmer score.
+    const original = item('original', 5, { urgencyScore: 30 });
+    const bump = item('bump', 1, {
+      isBump: true,
+      bumpOfMessageId: 'original',
+      urgencyScore: 85,
+    });
+
+    const [only] = collapseBumpChains([bump, original]);
+    expect(only.bumps?.peakUrgencyScore).toBe(85);
+    expect(effectiveUrgency(only)).toBe(85);
+  });
+
+  it('stands in the oldest survivor when the original is gone', () => {
+    // The original was marked done, or a scope filtered it out. The chain must
+    // not vanish with it.
+    const bump1 = item('bump1', 2, { isBump: true, bumpOfMessageId: 'missing' });
+    const bump2 = item('bump2', 1, { isBump: true, bumpOfMessageId: 'bump1' });
+
+    const collapsed = collapseBumpChains([bump2, bump1]);
+    expect(collapsed).toHaveLength(1);
+    expect(collapsed[0].id).toBe('bump1');
+  });
+
+  it('is a no-op when nothing is a bump', () => {
+    const items = [item('a', 1, {}), item('b', 2, null)];
+    const collapsed = collapseBumpChains(items);
+    expect(collapsed).toHaveLength(2);
+    expect(collapsed.every((each) => each.bumps === null)).toBe(true);
+  });
+
+  it('does not treat a bump with no target as folding into anything', () => {
+    // `is_bump: true` with `bump_of: null` — the model saw a chase but could not
+    // name the original. One row must stay one row.
+    const lone = item('lone', 1, { isBump: true, bumpOfMessageId: null });
+    expect(collapseBumpChains([lone])).toHaveLength(1);
+  });
+});
+
+describe('sortQueue', () => {
+  it('orders by urgency, then by category, then by recency', () => {
+    const low = item('low', 1, { urgencyScore: 10 });
+    const high = item('high', 3, { urgencyScore: 90 });
+    const mid = item('mid', 2, { urgencyScore: 50 });
+
+    const sorted = sortQueue([low, high, mid], { mode: 'urgency' });
+    expect(sorted.map((each) => each.id)).toEqual(['high', 'mid', 'low']);
+  });
+
+  it('breaks an urgency tie with action_needed ahead of fyi and misc', () => {
+    const misc = item('misc', 1, { urgencyScore: 40, category: 'misc' });
+    const action = item('action', 1, {
+      urgencyScore: 40,
+      category: 'action_needed',
+    });
+    const fyi = item('fyi', 1, { urgencyScore: 40, category: 'fyi' });
+
+    const sorted = sortQueue([misc, fyi, action], { mode: 'urgency' });
+    expect(sorted.map((each) => each.id)).toEqual(['action', 'fyi', 'misc']);
+  });
+
+  it('collapses chains in recency mode so a chase does not resurface the item', () => {
+    const original = item('original', 5, {});
+    const bump = item('bump', 0, { isBump: true, bumpOfMessageId: 'original' });
+    const other = item('other', 2, {});
+
+    const sorted = sortQueue([bump, other, original], { mode: 'recency' });
+
+    // Without collapsing, `bump` (today) would sit at the top. With it, the
+    // chain is represented by the 5-day-old original, which sorts *below* the
+    // 2-day-old message — staleness surfaced rather than newness faked.
+    expect(sorted.map((each) => each.id)).toEqual(['other', 'original']);
+  });
+
+  it('can be asked not to collapse', () => {
+    const original = item('original', 5, {});
+    const bump = item('bump', 1, { isBump: true, bumpOfMessageId: 'original' });
+
+    const sorted = sortQueue([bump, original], {
+      mode: 'recency',
+      collapseBumps: false,
+    });
+    expect(sorted).toHaveLength(2);
+  });
+
+  it('sorts unclassified messages after classified ones without dropping them', () => {
+    // Classification is async (CLAUDE.md), so the queue is always rendered with
+    // some rows not yet classified. They must still be reachable.
+    const classified = item('classified', 2, { urgencyScore: 70 });
+    const pending = item('pending', 1, null);
+
+    const sorted = sortQueue([pending, classified], { mode: 'urgency' });
+    expect(sorted.map((each) => each.id)).toEqual(['classified', 'pending']);
+    expect(unclassifiedCount(sorted)).toBe(1);
+  });
+});
+
+describe('compareByUrgency', () => {
+  it('is a total order, so the queue does not jitter between renders', () => {
+    const a = item('a', 1, { urgencyScore: 50 });
+    const b = item('b', 1, { urgencyScore: 50 });
+    expect(compareByUrgency(a, b)).toBe(-compareByUrgency(b, a));
+    expect(compareByUrgency(a, a)).toBe(0);
   });
 });

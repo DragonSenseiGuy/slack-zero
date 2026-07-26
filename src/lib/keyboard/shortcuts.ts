@@ -8,8 +8,8 @@
  * "I clicked around and it seemed fine".
  *
  * Phase 2 shortcuts (plan.md): `j`/`k` move, `Enter` open, `e` mark done,
- * `Esc` back, `⌘K` command palette. Reply (`r`) is Phase 5 and snooze (`h`)
- * is Phase 6 — deliberately absent.
+ * `Esc` back, `⌘K` command palette. Phase 3 adds `s` to switch sort mode.
+ * Reply (`r`) is Phase 5 and snooze (`h`) is Phase 6 — deliberately absent.
  */
 
 /** Which surface currently owns the keyboard. */
@@ -29,7 +29,9 @@ export type InboxAction =
   | { type: 'closePalette' }
   /** Confirm the highlighted palette entry. */
   | { type: 'palettePick' }
-  | { type: 'toggleShowDone' };
+  | { type: 'toggleShowDone' }
+  /** Switch between sort-by-urgency and sort-by-recency (Phase 3). */
+  | { type: 'cycleSort' };
 
 /**
  * The parts of a `KeyboardEvent` this module reads. Declared structurally so
@@ -133,6 +135,8 @@ export function resolveShortcut(
       return { type: 'moveTo', position: 'last' };
     case 'u':
       return { type: 'toggleShowDone' };
+    case 's':
+      return { type: 'cycleSort' };
     default:
       return null;
   }
@@ -166,6 +170,7 @@ export const SHORTCUT_HELP: ReadonlyArray<{ keys: string; description: string }>
     { keys: 'e', description: 'Mark done (or undo)' },
     { keys: 'Esc', description: 'Back to the list / clear the filter' },
     { keys: '⌘K', description: 'Jump to a channel or person' },
+    { keys: 's', description: 'Sort by urgency / recency' },
     { keys: 'u', description: 'Show or hide done items' },
     { keys: 'g / G', description: 'First / last message' },
   ];

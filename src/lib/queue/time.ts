@@ -40,6 +40,49 @@ export function formatRelativeTime(iso: string, nowIso: string): string {
   return `${Math.floor(elapsed / YEAR)}y`;
 }
 
+/**
+ * Long-form age: "just now", "5 minutes", "3 hours", "2 days", "3 weeks".
+ *
+ * The compact form above is right for a dense timestamp column; this one is for
+ * prose — the bump staleness label and the classification prompt, both of which
+ * read as sentences. Singular/plural is handled because "1 days ago" in a
+ * user-facing string looks like a bug.
+ */
+export function describeAge(iso: string, nowIso: string): string {
+  const then = Date.parse(iso);
+  const now = Date.parse(nowIso);
+  if (!Number.isFinite(then) || !Number.isFinite(now)) return 'an unknown time';
+
+  const elapsed = now - then;
+  if (elapsed < MINUTE) return 'just now';
+
+  const unit = (value: number, name: string) =>
+    `${value} ${name}${value === 1 ? '' : 's'}`;
+
+  if (elapsed < HOUR) return unit(Math.floor(elapsed / MINUTE), 'minute');
+  if (elapsed < DAY) return unit(Math.floor(elapsed / HOUR), 'hour');
+  if (elapsed < WEEK) return unit(Math.floor(elapsed / DAY), 'day');
+  if (elapsed < YEAR) return unit(Math.floor(elapsed / WEEK), 'week');
+  return unit(Math.floor(elapsed / YEAR), 'year');
+}
+
+/**
+ * The label a collapsed bump chain wears (plan.md, Phase 3: "a 3-message bump
+ * chain should appear as 1 item showing 'first asked X days ago'").
+ *
+ * The point of collapsing is that a chase does *not* make the item look new —
+ * so the row states how long the original ask has been sitting there.
+ */
+export function bumpStalenessLabel(
+  firstAskedAtIso: string,
+  nowIso: string,
+): string {
+  const age = describeAge(firstAskedAtIso, nowIso);
+  return age === 'just now'
+    ? 'first asked just now'
+    : `first asked ${age} ago`;
+}
+
 /** Day bucket for the list's group headers. Also relative, also pure. */
 export function formatDayBucket(iso: string, nowIso: string): string {
   const then = Date.parse(iso);

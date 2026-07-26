@@ -4,6 +4,7 @@ import {
   renderSlackText,
   type LabelLookup,
 } from '@/lib/queue/text';
+import { categoryRank, type MessageTriage } from '@/lib/triage/types';
 
 /**
  * The queue model: which stored messages belong in the unified inbox, in what
@@ -15,9 +16,10 @@ import {
  * sort be unit tested against fixtures with no live Slack and no database
  * (CLAUDE.md, "Unit test pure logic ... with fixture data").
  *
- * Phase 2 is deliberately *not smart*: sorting is recency only. Urgency
- * scoring, action/misc classification, and bump collapsing are Phase 3, and
- * saved views/filters are Phase 4.
+ * Phase 3 adds the smart half: each item carries its `triage` result, and
+ * `sortQueue` implements the two modes plan.md asks for — sort-by-urgency, and
+ * sort-by-recency-with-bumps-collapsed. Both are still pure. Saved views and
+ * filters remain Phase 4.
  */
 
 // ---------------------------------------------------------------------------
@@ -86,6 +88,10 @@ export type QueueMessageRow = {
    * /unread. Absent `MessageState` row means "not done". */
   isDone: boolean;
   doneAt: Date | null;
+
+  /** AI triage result, or null when this message has not been classified yet
+   * (classification is async and must never block ingestion). */
+  triage: MessageTriage | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -99,6 +105,26 @@ export type QueueThreadReply = {
   senderLabel: string;
   senderAvatarUrl: string | null;
   body: string;
+};
+
+/**
+ * What a collapsed bump chain says about itself.
+ *
+ * Present only on a row that absorbed follow-ups. The whole point is that a
+ * chase must not make an item look new: the row keeps the *original* ask's
+ * timestamp and states how long it has been sitting there instead.
+ */
+export type QueueBumpSummary = {
+  /** How many follow-up messages were folded into this row. */
+  bumpCount: number;
+  /** ISO timestamp of the original ask (this row's own `sentAtIso`). */
+  firstAskedAtIso: string;
+  /** ISO timestamp of the most recent chase. */
+  lastBumpedAtIso: string;
+  /** Ids of the folded follow-ups, oldest first. */
+  bumpMessageIds: string[];
+  /** Highest urgency anywhere in the chain, null if none were classified. */
+  peakUrgencyScore: number | null;
 };
 
 export type QueueItem = {
@@ -138,6 +164,12 @@ export type QueueItem = {
 
   /** Populated for thread parents so the pane can show the thread inline. */
   threadReplies: QueueThreadReply[];
+
+  /** AI triage result. Null until the async classifier has seen it. */
+  triage: MessageTriage | null;
+
+  /** Set by `collapseBumpChains` on a row that absorbed follow-ups. */
+  bumps: QueueBumpSummary | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -350,6 +382,9 @@ export function toQueueItem(
     reactions: row.reactions ?? [],
 
     threadReplies: [],
+
+    triage: row.triage,
+    bumps: null,
   };
 }
 
@@ -498,6 +533,227 @@ export function queueCounts(
   }
 
   return { open, done, total: open + done };
+}
+
+// ---------------------------------------------------------------------------
+// Sorting: urgency, and recency with bumps collapsed (Phase 3)
+// ---------------------------------------------------------------------------
+
+export type QueueSortMode = 'urgency' | 'recency';
+
+export const QUEUE_SORT_MODES: readonly QueueSortMode[] = [
+  'urgency',
+  'recency',
+] as const;
+
+export const SORT_MODE_LABEL: Record<QueueSortMode, string> = {
+  urgency: 'Urgency',
+  recency: 'Recent',
+};
+
+export function nextSortMode(mode: QueueSortMode): QueueSortMode {
+  return mode === 'urgency' ? 'recency' : 'urgency';
+}
+
+/**
+ * The urgency a row should be *sorted* by.
+ *
+ * For a plain row that is its own score. For a collapsed bump chain it is the
+ * highest score anywhere in the chain: if the original ask read as a routine
+ * 45 and the third chase says the release is now blocked, the chain has to
+ * surface at the chase's urgency, not the ask's.
+ *
+ * Null means "not classified yet" — a real state, because classification is
+ * async and deliberately never blocks ingestion.
+ */
+export function effectiveUrgency(item: QueueItem): number | null {
+  const own = item.triage?.urgencyScore ?? null;
+  const peak = item.bumps?.peakUrgencyScore ?? null;
+  if (own === null) return peak;
+  if (peak === null) return own;
+  return Math.max(own, peak);
+}
+
+/** Unclassified items rank after every category, never between them. */
+const UNCLASSIFIED_RANK = 99;
+
+/**
+ * Most urgent first.
+ *
+ * Unclassified items go to the *bottom* rather than being given an invented
+ * middling score. Putting a fabricated number into the sort would be
+ * indistinguishable, from the outside, from the model having actually judged
+ * the message — and the queue's whole claim is that its order is explainable.
+ * The UI says how many are still pending instead.
+ */
+export function compareByUrgency(a: QueueItem, b: QueueItem): number {
+  const urgencyA = effectiveUrgency(a);
+  const urgencyB = effectiveUrgency(b);
+
+  if (urgencyA === null && urgencyB !== null) return 1;
+  if (urgencyB === null && urgencyA !== null) return -1;
+  if (urgencyA !== null && urgencyB !== null && urgencyA !== urgencyB) {
+    return urgencyB - urgencyA;
+  }
+
+  const rankA = a.triage ? categoryRank(a.triage.category) : UNCLASSIFIED_RANK;
+  const rankB = b.triage ? categoryRank(b.triage.category) : UNCLASSIFIED_RANK;
+  if (rankA !== rankB) return rankA - rankB;
+
+  return compareByRecency(a, b);
+}
+
+/** Guard against a `bumpOf` cycle the model could produce. */
+export const MAX_BUMP_CHAIN_DEPTH = 32;
+
+/**
+ * Walk a bump chain back to the message that was originally asked.
+ *
+ * `links` maps a follow-up's id to the id it chases. A chase of a chase is
+ * normal ("bump" -> "any update?" -> the real question), so this is transitive.
+ * Returns the last id reachable, which may be an id we do not hold — the
+ * caller decides what to do about that.
+ */
+export function resolveBumpRoot(
+  id: string,
+  links: ReadonlyMap<string, string>,
+): string {
+  let current = id;
+  const seen = new Set<string>([id]);
+
+  for (let depth = 0; depth < MAX_BUMP_CHAIN_DEPTH; depth += 1) {
+    const next = links.get(current);
+    if (next === undefined || next === current || seen.has(next)) return current;
+    seen.add(next);
+    current = next;
+  }
+
+  return current;
+}
+
+function olderFirst(a: QueueItem, b: QueueItem): number {
+  return -compareByRecency(a, b);
+}
+
+/**
+ * Fold each bump chain into a single row (plan.md, Phase 3: "a 3-message bump
+ * chain should appear as 1 item showing 'first asked X days ago'").
+ *
+ * The survivor is the *original ask*, keeping its own timestamp — which is what
+ * makes the recency sort surface staleness instead of treating a chase as new
+ * activity. The follow-ups do not disappear from the data; they are summarized
+ * onto the row as a count and a "last bumped" time.
+ *
+ * When the original is not in the list (it was marked done, or filtered out by
+ * a scope), the oldest surviving member of the chain stands in for it rather
+ * than the whole chain vanishing.
+ */
+export function collapseBumpChains(items: readonly QueueItem[]): QueueItem[] {
+  const links = new Map<string, string>();
+  for (const item of items) {
+    const triage = item.triage;
+    if (triage?.isBump && triage.bumpOfMessageId) {
+      links.set(item.id, triage.bumpOfMessageId);
+    }
+  }
+
+  if (links.size === 0) return items.map((item) => ({ ...item, bumps: null }));
+
+  const present = new Set(items.map((item) => item.id));
+  const groups = new Map<string, QueueItem[]>();
+  const order: string[] = [];
+
+  for (const item of items) {
+    const rootId = resolveBumpRoot(item.id, links);
+    // A chain whose root we do not hold still has to group together, so key on
+    // the resolved root either way.
+    const key = present.has(rootId) ? rootId : `missing:${rootId}`;
+    const bucket = groups.get(key);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      groups.set(key, [item]);
+      order.push(key);
+    }
+  }
+
+  const collapsed: QueueItem[] = [];
+
+  for (const key of order) {
+    const members = (groups.get(key) as QueueItem[]).slice().sort(olderFirst);
+
+    if (members.length === 1) {
+      collapsed.push({ ...members[0], bumps: null });
+      continue;
+    }
+
+    const rootId = key.startsWith('missing:') ? null : key;
+    const representative =
+      (rootId !== null
+        ? members.find((member) => member.id === rootId)
+        : undefined) ?? members[0];
+
+    const followers = members.filter(
+      (member) => member.id !== representative.id,
+    );
+
+    let peakUrgencyScore: number | null =
+      representative.triage?.urgencyScore ?? null;
+    for (const follower of followers) {
+      const score = follower.triage?.urgencyScore ?? null;
+      if (score === null) continue;
+      peakUrgencyScore =
+        peakUrgencyScore === null ? score : Math.max(peakUrgencyScore, score);
+    }
+
+    collapsed.push({
+      ...representative,
+      bumps: {
+        bumpCount: followers.length,
+        firstAskedAtIso: representative.sentAtIso,
+        lastBumpedAtIso: followers[followers.length - 1].sentAtIso,
+        bumpMessageIds: followers.map((follower) => follower.id),
+        peakUrgencyScore,
+      },
+    });
+  }
+
+  return collapsed;
+}
+
+export type SortQueueOptions = {
+  mode: QueueSortMode;
+  /**
+   * Collapsing is on in both modes. plan.md names it as part of the recency
+   * mode, but a chain that shows as three rows in the urgency mode is the same
+   * inbox-clutter bug the feature exists to fix — the modes differ in *order*,
+   * not in how many rows a conversation is worth.
+   */
+  collapseBumps?: boolean;
+};
+
+/** The queue, in the order the user asked for. */
+export function sortQueue(
+  items: readonly QueueItem[],
+  options: SortQueueOptions,
+): QueueItem[] {
+  const rows =
+    options.collapseBumps === false
+      ? items.map((item) => ({ ...item }))
+      : collapseBumpChains(items);
+
+  return rows.sort(
+    options.mode === 'urgency' ? compareByUrgency : compareByRecency,
+  );
+}
+
+/** How many rows are still waiting on the async classifier. */
+export function unclassifiedCount(items: readonly QueueItem[]): number {
+  let count = 0;
+  for (const item of items) {
+    if (item.triage === null) count += 1;
+  }
+  return count;
 }
 
 /**

@@ -12,6 +12,11 @@ import {
   type QueueUser,
 } from '@/lib/queue/queue';
 import type { PaletteEntry } from '@/lib/palette/search';
+import {
+  fromDbCategory,
+  type DbMessageCategory,
+  type MessageTriage,
+} from '@/lib/triage/types';
 
 /**
  * The IO half of the queue: read Postgres, hand plain rows to the pure
@@ -89,6 +94,20 @@ const MESSAGE_SELECT = {
     },
   },
   state: { select: { isDone: true, doneAt: true } },
+  classification: {
+    select: {
+      urgencyScore: true,
+      category: true,
+      isBump: true,
+      bumpOfMessageId: true,
+      // `reason` is selected deliberately: CLAUDE.md requires the model's
+      // reasoning travel with the score so the sort order is arguable rather
+      // than a black box. The reading pane renders it.
+      reason: true,
+      model: true,
+      updatedAt: true,
+    },
+  },
 } as const;
 
 type DbMessage = {
@@ -117,7 +136,31 @@ type DbMessage = {
     peerUserId: string | null;
   };
   state: { isDone: boolean; doneAt: Date | null } | null;
+  classification: {
+    urgencyScore: number;
+    category: DbMessageCategory;
+    isBump: boolean;
+    bumpOfMessageId: string | null;
+    reason: string;
+    model: string;
+    updatedAt: Date;
+  } | null;
 };
+
+function toTriage(
+  classification: DbMessage['classification'],
+): MessageTriage | null {
+  if (!classification) return null;
+  return {
+    urgencyScore: classification.urgencyScore,
+    category: fromDbCategory(classification.category),
+    isBump: classification.isBump,
+    bumpOfMessageId: classification.bumpOfMessageId,
+    reason: classification.reason,
+    model: classification.model,
+    classifiedAtIso: classification.updatedAt.toISOString(),
+  };
+}
 
 function toQueueMessageRow(message: DbMessage): QueueMessageRow {
   return {
@@ -142,6 +185,7 @@ function toQueueMessageRow(message: DbMessage): QueueMessageRow {
     conversation: message.conversation,
     isDone: message.state?.isDone ?? false,
     doneAt: message.state?.doneAt ?? null,
+    triage: toTriage(message.classification),
   };
 }
 

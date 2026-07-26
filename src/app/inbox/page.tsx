@@ -17,6 +17,20 @@ import type { SavedView } from '@/lib/views/filters';
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Do NOT add a `loading.tsx` to this route (or to the app root).
+ *
+ * A route-level Suspense boundary makes `revalidatePath('/inbox')` — which every
+ * server action here calls — tear down and remount `InboxClient`. That discards
+ * all of its state: the sort mode, the palette scope, the selected row, and the
+ * in-flight/confirmed save counters. Marking an item done would visibly reset
+ * the inbox under the user.
+ *
+ * It was added in Phase 8 and removed the same day, after four e2e tests caught
+ * it. `/stats` keeps its loading state safely, because it holds no client state
+ * to lose.
+ */
+
 export const metadata = {
   title: 'Inbox · SlackZero',
 };

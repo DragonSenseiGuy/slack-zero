@@ -151,9 +151,30 @@ describe('sendReplyToMessage when Slack rejects the send', () => {
     const result = await sendReplyToMessage('m1', 'On it.', { markDone: true });
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.error).toMatch(/channel_not_found/);
+    // Phase 8 translates Slack's terse codes into something actionable, and
+    // says plainly when retrying is pointless.
+    expect(result.ok === false && result.error).toMatch(/no longer exists/i);
+    expect(result.ok === false && result.error).toMatch(/will not help/i);
 
     // The assertion this whole file exists for.
+    expect(messageStateUpsert).not.toHaveBeenCalled();
+  });
+
+  it('tells the user to wait when Slack rate limits the send', async () => {
+    sendReply.mockRejectedValue(
+      Object.assign(new Error('An API error occurred: ratelimited'), {
+        data: { ok: false, error: 'ratelimited' },
+        retryAfter: 20,
+      }),
+    );
+
+    const result = await sendReplyToMessage('m1', 'On it.', { markDone: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toMatch(/rate limiting/i);
+    expect(result.ok === false && result.error).toContain('20s');
+    // Retryable, so it must NOT claim retrying is pointless.
+    expect(result.ok === false && result.error).not.toMatch(/will not help/i);
     expect(messageStateUpsert).not.toHaveBeenCalled();
   });
 
@@ -166,7 +187,7 @@ describe('sendReplyToMessage when Slack rejects the send', () => {
   });
 
   it('surfaces a rate-limit failure rather than appearing to succeed', async () => {
-    sendReply.mockRejectedValue(new Error('ratelimited'));
+    sendReply.mockRejectedValue(new Error('An API error occurred: ratelimited'));
 
     const result = await sendReplyToMessage('m1', 'On it.', { markDone: true });
 

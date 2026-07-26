@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { CommandPalette } from '@/app/inbox/CommandPalette';
 import { ReplyBox } from '@/app/inbox/ReplyBox';
+import { ShortcutOverlay } from '@/app/inbox/ShortcutOverlay';
 import { SnoozeMenu } from '@/app/inbox/SnoozeMenu';
 import { ViewBuilder } from '@/app/inbox/ViewBuilder';
 import { ViewSidebar } from '@/app/inbox/ViewSidebar';
@@ -134,6 +135,7 @@ export function InboxClient({
   /** Auto-mark done after sending. plan.md: configurable, on by default. */
   const [replyMarkDone, setReplyMarkDone] = useState(true);
   /** Snooze picker (Phase 6). */
+  const [helpOpen, setHelpOpen] = useState(false);
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [snoozeBusy, setSnoozeBusy] = useState(false);
   const [snoozeError, setSnoozeError] = useState<string | null>(null);
@@ -583,6 +585,10 @@ export function InboxClient({
           break;
 
         case 'back':
+          if (helpOpen) {
+            setHelpOpen(false);
+            break;
+          }
           // The snooze picker is the innermost layer, so Escape closes it
           // first — before the reading pane or the palette scope.
           if (snoozeOpen) {
@@ -622,6 +628,10 @@ export function InboxClient({
           requestDrafts();
           break;
 
+        case 'toggleHelp':
+          setHelpOpen((current) => !current);
+          break;
+
         case 'snooze':
           if (selectedItem) {
             setSnoozeError(null);
@@ -657,6 +667,7 @@ export function InboxClient({
     pickPaletteEntry,
     requestDrafts,
     snoozeOpen,
+    helpOpen,
   ]);
 
   // Keep the stored index in range when the list shrinks under the cursor
@@ -720,6 +731,15 @@ export function InboxClient({
         ) : null}
 
         <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setHelpOpen(true)}
+            data-testid="open-help"
+            aria-label="Keyboard shortcuts"
+            className="rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50"
+          >
+            ?
+          </button>
           <Link
             href="/stats"
             data-testid="stats-link"
@@ -880,6 +900,10 @@ export function InboxClient({
           ))}
         </ul>
       </footer>
+
+      {helpOpen ? (
+        <ShortcutOverlay onClose={() => setHelpOpen(false)} />
+      ) : null}
 
       {snoozeOpen && selectedItem ? (
         <SnoozeMenu

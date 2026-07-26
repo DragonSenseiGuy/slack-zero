@@ -37,7 +37,9 @@ export type InboxAction =
   /** Put the cursor in the reply box (Phase 5). */
   | { type: 'focusReply' }
   /** Open the snooze picker (Phase 6). */
-  | { type: 'snooze' };
+  | { type: 'snooze' }
+  /** Toggle the keyboard cheat sheet (Phase 8). */
+  | { type: 'toggleHelp' };
 
 /**
  * The parts of a `KeyboardEvent` this module reads. Declared structurally so
@@ -149,6 +151,8 @@ export function resolveShortcut(
       return { type: 'focusReply' };
     case 'h':
       return { type: 'snooze' };
+    case '?':
+      return { type: 'toggleHelp' };
     default:
       return null;
   }
@@ -188,4 +192,5 @@ export const SHORTCUT_HELP: ReadonlyArray<{ keys: string; description: string }>
     { keys: 'r', description: 'Reply' },
     { keys: 'd', description: 'Suggest replies' },
     { keys: 'h', description: 'Snooze' },
+    { keys: '?', description: 'This list' },
   ];

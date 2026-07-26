@@ -7,6 +7,7 @@ import { isLlmConfigured } from '@/lib/env';
 import { renderSlackText } from '@/lib/queue/text';
 import { generateDrafts } from '@/lib/reply/generate';
 import { replyTargetThreadTs, sendReply } from '@/lib/reply/send';
+import { describeSlackError } from '@/lib/slack/errors';
 import type { ReplyDraft } from '@/lib/reply/draft';
 import { getInstallation } from '@/lib/slack/installation';
 
@@ -83,8 +84,15 @@ export async function sendReplyToMessage(
     });
     sentTs = sent.ts;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { ok: false, error: `Could not send the reply: ${detail}` };
+    // Slack's raw codes ("not_in_channel", "ratelimited") tell the user nothing
+    // about whether to retry or go fix a permission (Phase 8).
+    const failure = describeSlackError(error);
+    return {
+      ok: false,
+      error: failure.retryable
+        ? `${failure.message}`
+        : `${failure.message} (Retrying will not help.)`,
+    };
   }
 
   // Sent. From here on nothing may turn this into a failure result — the

@@ -98,6 +98,23 @@ describe('resolveShortcut — list mode', () => {
     });
   });
 
+  it('binds ? to the cheat sheet', () => {
+    expect(resolveShortcut(key('?'), inMode('list'))).toEqual({
+      type: 'toggleHelp',
+    });
+    // And stands down while typing, so "why?" in a reply does not open it.
+    expect(resolveShortcut(key('?'), { mode: 'list', isTyping: true })).toBeNull();
+  });
+
+  it('documents every binding it resolves', () => {
+    // The overlay and the footer both render SHORTCUT_HELP, so a key that
+    // resolves but is undocumented would be invisible to the user.
+    const documented = SHORTCUT_HELP.map((entry) => entry.keys).join(' ');
+    for (const k of ['j', 'k', 'e', 'u', 's', 'r', 'd', 'h', '?']) {
+      expect(documented, `${k} is bound but undocumented`).toContain(k);
+    }
+  });
+
   it('binds the Phase 6 snooze key', () => {
     // Reserved and asserted-unbound since Phase 2; Phase 6 is the phase that
     // claims it, so the guard moves rather than disappearing.

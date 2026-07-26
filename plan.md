@@ -822,7 +822,73 @@ so that guard moved rather than disappearing.
 ---
 
 ## Phase 8: Polish, Error Handling, Docs
-**Status:** Not started
+**Status:** Done — both verification items pass.
+
+**Verified 2026-07-26:**
+- `npm run test` → **577 tests / 24 files** (was 561/23); `npx tsc --noEmit`,
+  `npm run lint`, `npm run build` clean.
+- **Full Playwright suite green in one run (verification #1):** 42 tests across
+  6 spec files, 41 passed + 1 skipped (Phase 5's opt-in live send).
+- **Manual smoke test (verification #2):** every route exercised against the
+  real workspace — `/` `/inbox` `/stats` `/health` `/api/health` all 200,
+  `/no-such-page` 404, health reports `db: ok · slack: ok · llm: ok`, 0
+  unclassified messages, no raw `<@U…>` tokens leaking into the HTML, and no
+  errors or warnings in the dev server log. Findings written up in
+  `KNOWN_ISSUES.md`.
+
+**Built:**
+- Root error boundary (`app/error.tsx`) showing the actual message — this is a
+  single-user local tool and the "user" is the person who can fix it.
+- `not-found.tsx`, and a loading state for `/stats`.
+- `?` cheat-sheet overlay, rendered from `SHORTCUT_HELP` — the same list the
+  footer uses and the same module that resolves keys, so it cannot drift into
+  documenting a binding that no longer works. There is a test asserting the
+  overlay row count equals `SHORTCUT_HELP.length` rather than a literal.
+- `src/lib/slack/errors.ts`: translates Slack's terse codes into something
+  actionable, and classifies each as retryable or not. 13 unit tests. Wired into
+  the reply path, so a rate-limited send now says "wait ~20s" instead of
+  `ratelimited`, and a permission failure says plainly that retrying will not
+  help.
+- `README.md` rewritten from the `create-next-app` boilerplate it still was.
+- `KNOWN_ISSUES.md`, ordered by how likely each issue is to bite in daily use.
+
+**On rate limiting:** `WebClient` was already configured with
+`retryPolicies.fiveRetriesInFiveMinutes` and `rejectRateLimitedCalls: false`
+since Phase 1, so backoff and retry were in place. What was missing was
+*legibility* — a queued call is invisible, and an interactive send that silently
+waits minutes on "Sending…" reads as a hang. That is what this phase added.
+
+**The bug this phase introduced and then caught:**
+A `loading.tsx` was added to `/inbox` and to the app root. Both were removed the
+same day. A route-level Suspense boundary makes `revalidatePath('/inbox')` —
+which **every** server action in the inbox calls — tear down and remount
+`InboxClient`, discarding all of its state: sort mode, palette scope, selected
+row, and the in-flight/confirmed save counters. In the UI, marking an item done
+would visibly reset the inbox under the user.
+
+Four e2e tests caught it (`inbox`, `snooze`, `stats`, `views` — every test that
+writes and then reloads), and the giveaway was in the DOM attributes: `sort-mode`
+had reverted from `recency` to `urgency` and `confirmed-saves` to `0`. Worth
+recording because the fix is counter-intuitive — the "polish" change was the
+regression. A note in `src/app/inbox/page.tsx` and in `KNOWN_ISSUES.md` warns
+against re-adding it. `/stats` keeps its loading state safely, holding no client
+state to lose.
+
+---
+
+## Remaining work
+
+**Phase 5's live send is still unverified.** Everything else in all 8 phases is
+green. The reply path has 60 unit tests including the failure path, but a reply
+has never actually been posted to Slack from the app. Close it with either a
+manual send from `/inbox`, or:
+
+```bash
+SLACKZERO_E2E_LIVE_SEND=1 npm run test:e2e -- e2e/reply.spec.ts
+```
+
+See `KNOWN_ISSUES.md` for the full list of what is thin, most of which comes
+down to the connected workspace holding 8 trivial messages.
 
 **Objective:** Make it robust enough for daily personal use.
 

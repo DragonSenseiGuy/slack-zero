@@ -48,6 +48,8 @@ export type QueueUser = {
   displayName: string | null;
   avatarUrl: string | null;
   isBot: boolean;
+  /** Marked important by the user. Drives Phase 4's VIP filter and sort. */
+  isVip: boolean;
 };
 
 export type QueueConversation = {
@@ -140,6 +142,8 @@ export type QueueItem = {
   senderLabel: string;
   senderAvatarUrl: string | null;
   isBotSender: boolean;
+  /** Sender is a VIP (Phase 4). Resolved here so filters stay pure. */
+  isVipSender: boolean;
 
   /** "#general", "Direct message", "Group DM" — the channel/DM context. */
   contextLabel: string;
@@ -359,6 +363,7 @@ export function toQueueItem(
     senderLabel: senderLabelFor(row, users),
     senderAvatarUrl: sender?.avatarUrl ?? null,
     isBotSender: sender?.isBot ?? row.botId !== null,
+    isVipSender: sender?.isVip ?? false,
 
     contextLabel: contextLabelFor(row.conversation, users),
     contextKind: row.conversation.kind,

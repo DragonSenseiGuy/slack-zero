@@ -75,10 +75,26 @@ async function scopeToFixtures(page: Page) {
   );
 }
 
+/**
+ * Load, scope to the fixtures, and pin the sort to recency.
+ *
+ * Pinning matters: this suite is about navigation and done state, and its
+ * assertions name specific rows by position. The default sort is urgency, and
+ * since Phase 4 the fixtures carry real categories — so leaving the sort alone
+ * would make these tests depend on seeded urgency scores rather than on the
+ * behaviour they are actually checking. (They passed before only because
+ * unclassified rows make the urgency sort fall through to recency.)
+ */
 async function openScopedInbox(page: Page) {
   await loadInbox(page);
   await scopeToFixtures(page);
   await expect(page.getByTestId('queue-item')).toHaveCount(FIXTURE_ITEM_COUNT);
+
+  await page.keyboard.press('s');
+  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
+    'data-sort-mode',
+    'recency',
+  );
 }
 
 function selectedRow(page: Page) {
@@ -118,8 +134,8 @@ test('the queue loads, newest first, with sender / preview / context / time', as
   const first = page.getByTestId('queue-item').first();
   await expect(first).toContainText(FIXTURE_USER_LABEL);
   await expect(first).toContainText(`#${FIXTURE_CHANNEL_NAME}`);
-  await expect(first).toContainText(FIXTURE_NEWEST_TEXT);
 
+  await expect(first).toContainText(FIXTURE_NEWEST_TEXT);
   await expect(page.getByTestId('queue-item').nth(1)).toContainText(
     FIXTURE_SECOND_TEXT,
   );

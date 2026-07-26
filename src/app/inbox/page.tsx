@@ -1,7 +1,9 @@
 import Link from 'next/link';
 
 import { loadInbox } from '@/lib/queue/load';
+import { listViews } from '@/lib/views/actions';
 import { InboxClient } from '@/app/inbox/InboxClient';
+import type { SavedView } from '@/lib/views/filters';
 
 /**
  * The unified inbox (plan.md, Phase 2).
@@ -42,6 +44,16 @@ export default async function InboxPage() {
     );
   }
 
+  // Saved views are a separate read on purpose: a failure here should cost the
+  // sidebar, not the whole queue. With no views the inbox still works — it just
+  // falls back to the unfiltered list.
+  let views: SavedView[] = [];
+  try {
+    views = await listViews();
+  } catch {
+    views = [];
+  }
+
   // The clock is read once, here, and passed down — see the note in
   // `lib/queue/time.ts` about hydration.
   const nowIso = new Date().toISOString();
@@ -53,6 +65,7 @@ export default async function InboxPage() {
       workspaceName={data.workspaceName}
       isConnected={data.authedUserId !== null}
       nowIso={nowIso}
+      views={views}
     />
   );
 }

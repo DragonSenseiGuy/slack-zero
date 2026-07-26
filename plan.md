@@ -514,7 +514,64 @@ Hack Club AI proxy.
 ---
 
 ## Phase 4: Custom Views & Filters
-**Status:** Not started
+**Status:** Done — both verification items pass.
+
+**Verified 2026-07-26:**
+- `npm run test` → **387 tests / 17 files** (was 348/16); `npx tsc --noEmit`,
+  `npm run lint`, `npm run build` clean.
+- `npm run test:e2e` → **18/18** (8 new in `e2e/views.spec.ts`).
+- **Filter-matching unit tests (verification #2):** 39 tests over every
+  dimension (category, reason, VIP, has-bump, classified-only, min-urgency,
+  scope, include-done), their combinations, all four sorts, and the
+  `parseViewFilters` persistence edge.
+- **e2e (verification #1):** a custom view with **two** filters
+  (`action_needed` + VIP-only) is created, saved, the page is fully reloaded,
+  the view is still there and still filters correctly. The test then revokes the
+  sender's VIP status and re-checks that the view empties — proving the two
+  filters are ANDed rather than one of them doing all the work.
+- Built-ins seed themselves on first load (verified in the DB: "Needs Reply",
+  "Waiting Room", "Everything"), and view switching is asserted not to reload
+  the page.
+- Real Slack data re-counted afterwards and unchanged: 6 `EVENT` + 2 `BACKFILL`
+  messages, 13 conversations, 11 users, 8 real classifications, and **0**
+  leftover `E2E ` views.
+
+**Design notes:**
+- `ViewDefinition.filters` stays a Json column: the filter vocabulary will keep
+  growing (Phase 6 adds snoozed/waiting-on) and a column per checkbox would be
+  absurd. The cost is that the JSON is untrusted, so `viewFiltersSchema`
+  validates writes and `parseViewFilters` tolerates unreadable reads by
+  degrading to "no filters" rather than crashing the inbox.
+- An **empty filter array means "no constraint"**, not "match nothing" — a
+  half-built view in the builder would otherwise show an empty queue and read as
+  broken.
+- A category filter **excludes unclassified rows**, since they have no category
+  to match. They are not hidden from unfiltered views: classification is async
+  and an unrated message is a normal state. There is an e2e test for exactly
+  this asymmetry.
+- `u` (show done) and the palette scope override a view rather than mutating it;
+  they are transient UI state, not part of the saved definition.
+- **VIP needed a new field.** plan.md lists VIP as both a filter and a sort, but
+  nothing in Slack's API carries it — it is our own judgement about a person, so
+  `User.isVip` was added (migration `20260726145839_phase4_view_filters_and_vip`).
+- Deleting a built-in view is **refused**, not ignored: it would be re-seeded on
+  the next empty-table check, so "deleting" one would appear to work and then
+  undo itself.
+
+**Two test-infrastructure bugs this phase exposed (both pre-existing):**
+1. **The e2e suite could not run in parallel.** `fullyParallel: true` plus a
+   single local Postgres and a shared fixture id namespace meant two spec files
+   deleted each other's rows mid-test. It was latent while only one spec seeded
+   data (`mode: 'serial'` covered it within a file); adding Phase 4's suite
+   exposed it immediately. Now `workers: 1`, with the reasoning recorded in
+   `playwright.config.ts`. Per-file namespaces would restore parallelism, but the
+   whole suite runs in ~25s.
+2. **Phase 2's "newest first" assertions were passing for the wrong reason.**
+   They relied on the fixtures having *no* classifications: with every row
+   unrated the urgency sort falls through to recency, so the two orders
+   coincided. Seeding real categories broke them — correctly. The Phase 2 helper
+   now pins the sort to recency explicitly, so those tests assert the mode they
+   actually mean.
 
 **Objective:** Saved views like the Slack screenshot, but with our AI
 dimensions available as filters.

@@ -96,6 +96,51 @@ export async function clearInboxFixtures(): Promise<void> {
     where: { id: FIXTURE_CHANNEL_ID },
   });
   await prisma.user.deleteMany({ where: { id: FIXTURE_USER_ID } });
+  // Views the Phase 4 suite creates. Built-ins are left alone: they are
+  // re-seeded by `listViews()` and deleting them is refused anyway.
+  await prisma.viewDefinition.deleteMany({
+    where: { name: { startsWith: E2E_VIEW_PREFIX }, isBuiltIn: false },
+  });
+}
+
+/**
+ * Names for views created by the e2e suite. Prefixed so cleanup can delete
+ * exactly the suite's own rows and never a view the user made by hand.
+ */
+export const E2E_VIEW_PREFIX = 'E2E ';
+
+/**
+ * Triage results for the fixtures, written straight to the database.
+ *
+ * Deliberately not produced by calling the model: a Playwright run must not
+ * depend on the live proxy, and Phase 4 is about whether *filters* select the
+ * right subset, which needs the categories to be known and fixed. Model quality
+ * is Phase 3's problem and is measured in `src/lib/triage/fixtures.test.ts`.
+ *
+ * alpha/bravo are action_needed, charlie/delta are fyi, echo/foxtrot are misc,
+ * and the thread parent is left unclassified so the suite also covers "a view
+ * that filters on category excludes rows the classifier has not reached".
+ */
+export const FIXTURE_CATEGORIES = {
+  'me2e-msg-0': { category: 'ACTION_NEEDED' as const, urgencyScore: 90 },
+  'me2e-msg-1': { category: 'ACTION_NEEDED' as const, urgencyScore: 55 },
+  'me2e-msg-2': { category: 'FYI' as const, urgencyScore: 25 },
+  'me2e-msg-3': { category: 'FYI' as const, urgencyScore: 20 },
+  'me2e-msg-4': { category: 'MISC' as const, urgencyScore: 10 },
+  'me2e-msg-5': { category: 'MISC' as const, urgencyScore: 5 },
+} as const;
+
+export const FIXTURE_ACTION_NEEDED_COUNT = 2;
+export const FIXTURE_FYI_MISC_COUNT = 4;
+/** The one row deliberately left without a Classification. */
+export const FIXTURE_UNCLASSIFIED_COUNT = 1;
+
+/** Mark the fixture sender VIP (or not), for the VIP filter and sort. */
+export async function setFixtureSenderVip(isVip: boolean): Promise<void> {
+  await prisma.user.update({
+    where: { id: FIXTURE_USER_ID },
+    data: { isVip },
+  });
 }
 
 /** Idempotent: clears first, so a crashed run cannot poison the next one. */
@@ -162,6 +207,17 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
         isThreadReply: true,
       })),
     ],
+  });
+
+  await prisma.classification.createMany({
+    data: Object.entries(FIXTURE_CATEGORIES).map(([messageId, result]) => ({
+      messageId,
+      category: result.category,
+      urgencyScore: result.urgencyScore,
+      isBump: false,
+      reason: 'seeded by the e2e fixtures, not by the model',
+      model: 'e2e-fixture',
+    })),
   });
 }
 

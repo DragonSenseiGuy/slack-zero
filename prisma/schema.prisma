@@ -97,6 +97,11 @@ model User {
   isBot     Boolean @default(false)
   isDeleted Boolean @default(false)
 
+  /// Marked important by the user. plan.md, Phase 4 lists VIP as both a filter
+  /// and a sort ("VIP-unreads-on-top"), and nothing in Slack's API carries this
+  /// — it is our own judgement about a person, so it lives on our User row.
+  isVip Boolean @default(false)
+
   messages Message[]
 
   firstSeenAt DateTime @default(now())

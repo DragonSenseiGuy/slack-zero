@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { CommandPalette } from '@/app/inbox/CommandPalette';
+import { ViewBuilder } from '@/app/inbox/ViewBuilder';
+import { ViewSidebar } from '@/app/inbox/ViewSidebar';
 import { Kbd, QueueList } from '@/app/inbox/QueueList';
 import { ReadingPane } from '@/app/inbox/ReadingPane';
 import {
@@ -15,8 +17,17 @@ import {
 import type { PaletteEntry } from '@/lib/palette/search';
 import { filterPaletteEntries } from '@/lib/palette/search';
 import { setMessageDone } from '@/lib/queue/actions';
+import { createView, deleteView, updateView } from '@/lib/views/actions';
 import {
-  applyQueueFilters,
+  applyViewFilters,
+  DEFAULT_VIEW_NAME,
+  sortForView,
+  type SavedView,
+  type ViewFilters,
+  type ViewLayout,
+  type ViewSort,
+} from '@/lib/views/filters';
+import {
   clampIndex,
   moveSelection,
   nextSortMode,
@@ -46,6 +57,8 @@ export type InboxClientProps = {
   workspaceName: string | null;
   isConnected: boolean;
   nowIso: string;
+  /** Saved views for the sidebar (plan.md, Phase 4). Empty is a valid state. */
+  views: SavedView[];
 };
 
 /** Local, unconfirmed done state layered over the server's. */
@@ -57,6 +70,7 @@ export function InboxClient({
   workspaceName,
   isConnected,
   nowIso,
+  views: initialViews,
 }: InboxClientProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [mode, setMode] = useState<InboxMode>('list');
@@ -72,6 +86,23 @@ export function InboxClient({
    */
   const [sortMode, setSortMode] = useState<QueueSortMode>('urgency');
   const [scope, setScope] = useState<QueueScope | null>(null);
+
+  /**
+   * Saved views (plan.md, Phase 4). Held in client state and seeded from the
+   * server so switching views is a re-filter of data already in memory — no
+   * fetch and no navigation, which is what "without full page reload" requires.
+   */
+  const [views, setViews] = useState<SavedView[]>(initialViews);
+  const [activeViewId, setActiveViewId] = useState<string | null>(() => {
+    const preferred =
+      initialViews.find((view) => view.name === DEFAULT_VIEW_NAME) ??
+      initialViews[0];
+    return preferred?.id ?? null;
+  });
+  /** null = closed; { view: null } = creating; { view } = editing. */
+  const [builder, setBuilder] = useState<{ view: SavedView | null } | null>(null);
+  const [builderBusy, setBuilderBusy] = useState(false);
+  const [builderError, setBuilderError] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, DoneOverride>>({});
   const [error, setError] = useState<string | null>(null);
   /**
@@ -105,17 +136,50 @@ export function InboxClient({
     [items, overrides],
   );
 
-  const visibleItems = useMemo(
-    () =>
-      // Filter first, then collapse and sort. Collapsing after filtering is
-      // what lets a chain whose original ask is already done still show up
-      // under its oldest surviving follow-up rather than disappearing.
-      sortQueue(
-        applyQueueFilters(effectiveItems, { includeDone: showDone, scope }),
-        { mode: sortMode },
-      ),
-    [effectiveItems, showDone, scope, sortMode],
+  const activeView = useMemo(
+    () => views.find((view) => view.id === activeViewId) ?? null,
+    [views, activeViewId],
   );
+
+  /**
+   * The view's own filters, with the two live toggles layered on top.
+   *
+   * `u` (show done) and the palette scope are transient UI state, not part of
+   * the saved view — so they override rather than mutate it. A view that saved
+   * `includeDone: true` still honours that; `u` can only widen.
+   */
+  const effectiveFilters = useMemo<ViewFilters>(
+    () => ({
+      ...(activeView?.filters ?? {}),
+      ...(showDone ? { includeDone: true } : {}),
+      ...(scope ? { scope } : {}),
+    }),
+    [activeView, showDone, scope],
+  );
+
+  const visibleItems = useMemo(() => {
+    // Filter first, then collapse and sort. Collapsing after filtering is what
+    // lets a chain whose original ask is already done still show up under its
+    // oldest surviving follow-up rather than disappearing.
+    const filtered = applyViewFilters(effectiveItems, effectiveFilters);
+
+    // The header's sort toggle stays authoritative while it is showing, so `s`
+    // keeps working inside a saved view; the view's own sort is the starting
+    // point for views that specify one of the Phase 4 orders.
+    if (activeView && (activeView.sort === 'oldest' || activeView.sort === 'vip_unread_first')) {
+      return sortForView(filtered, activeView.sort);
+    }
+    return sortQueue(filtered, { mode: sortMode });
+  }, [effectiveItems, effectiveFilters, activeView, sortMode]);
+
+  /** Open-item count per view, for the sidebar badges. */
+  const viewCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const view of views) {
+      counts[view.id] = applyViewFilters(effectiveItems, view.filters).length;
+    }
+    return counts;
+  }, [views, effectiveItems]);
 
   const counts = useMemo(
     () => queueCounts(effectiveItems, scope),
@@ -183,6 +247,96 @@ export function InboxClient({
           );
         })
         .finally(() => setPendingSaves((count) => Math.max(count - 1, 0)));
+    },
+    [],
+  );
+
+  const selectView = useCallback((view: SavedView) => {
+    setActiveViewId(view.id);
+    setSelectedIndex(0);
+    setMode('list');
+  }, []);
+
+  const saveView = useCallback(
+    (draft: {
+      name: string;
+      layout: ViewLayout;
+      sort: ViewSort;
+      filters: ViewFilters;
+    }) => {
+      const editing = builder?.view ?? null;
+      setBuilderBusy(true);
+      setBuilderError(null);
+
+      const run = editing
+        ? updateView(editing.id, draft)
+        : createView(draft);
+
+      void run
+        .then((result) => {
+          if (!result.ok) {
+            // Keep the dialog open with the reason — a duplicate name is the
+            // common case and retyping the whole view would be punishing.
+            setBuilderError(result.error);
+            return;
+          }
+          setViews((current) => {
+            const next = editing
+              ? current.map((view) =>
+                  view.id === result.view.id ? result.view : view,
+                )
+              : [...current, result.view];
+            return next
+              .slice()
+              .sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+          });
+          setActiveViewId(result.view.id);
+          setSelectedIndex(0);
+          setBuilder(null);
+        })
+        .catch((cause: unknown) => {
+          setBuilderError(
+            cause instanceof Error ? cause.message : 'Could not save the view.',
+          );
+        })
+        .finally(() => setBuilderBusy(false));
+    },
+    [builder],
+  );
+
+  const removeView = useCallback(
+    (view: SavedView) => {
+      setBuilderBusy(true);
+      setBuilderError(null);
+
+      void deleteView(view.id)
+        .then((result) => {
+          if (!result.ok) {
+            setBuilderError(result.error);
+            return;
+          }
+          setViews((current) => {
+            const next = current.filter((each) => each.id !== view.id);
+            // Never leave the inbox with no view selected — fall back to the
+            // default rather than rendering an unfiltered list with no sidebar
+            // selection, which reads as a broken state.
+            setActiveViewId((currentId) => {
+              if (currentId !== view.id) return currentId;
+              const fallback =
+                next.find((each) => each.name === DEFAULT_VIEW_NAME) ?? next[0];
+              return fallback?.id ?? null;
+            });
+            return next;
+          });
+          setSelectedIndex(0);
+          setBuilder(null);
+        })
+        .catch((cause: unknown) => {
+          setBuilderError(
+            cause instanceof Error ? cause.message : 'Could not delete the view.',
+          );
+        })
+        .finally(() => setBuilderBusy(false));
     },
     [],
   );
@@ -438,6 +592,23 @@ export function InboxClient({
       ) : null}
 
       <div className="flex min-h-0 flex-1">
+        {views.length > 0 ? (
+          <ViewSidebar
+            views={views}
+            activeViewId={activeViewId}
+            counts={viewCounts}
+            onSelect={selectView}
+            onNew={() => {
+              setBuilderError(null);
+              setBuilder({ view: null });
+            }}
+            onEdit={(view) => {
+              setBuilderError(null);
+              setBuilder({ view });
+            }}
+          />
+        ) : null}
+
         <div
           ref={listRef}
           tabIndex={-1}
@@ -447,12 +618,14 @@ export function InboxClient({
           data-pending-saves={pendingSaves}
           data-confirmed-saves={confirmedSaves}
           data-sort-mode={sortMode}
+          data-active-view={activeView?.name ?? ''}
           className="w-full max-w-md shrink-0 overflow-y-auto border-r border-neutral-200 outline-none"
         >
           <QueueList
             items={visibleItems}
             selectedIndex={safeIndex}
             nowIso={nowIso}
+            layout={activeView?.layout ?? 'detailed'}
             showDayBuckets={sortMode === 'recency'}
             onSelect={setSelectedIndex}
             onOpen={(index) => {
@@ -485,6 +658,20 @@ export function InboxClient({
           ))}
         </ul>
       </footer>
+
+      {builder ? (
+        <ViewBuilder
+          view={builder.view}
+          busy={builderBusy}
+          error={builderError}
+          onSave={saveView}
+          onDelete={removeView}
+          onCancel={() => {
+            setBuilder(null);
+            setBuilderError(null);
+          }}
+        />
+      ) : null}
 
       {paletteOpen ? (
         <CommandPalette

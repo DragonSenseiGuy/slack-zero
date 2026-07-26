@@ -5,6 +5,7 @@ import { Fragment, useEffect, useRef } from 'react';
 import type { QueueItem, QueueReason } from '@/lib/queue/queue';
 import { formatDayBucket, formatRelativeTime } from '@/lib/queue/time';
 import { BumpBadge, TriageBadges } from '@/app/inbox/TriageBadges';
+import type { ViewLayout } from '@/lib/views/filters';
 
 /**
  * The queue list. One row per message: sender, preview, channel/DM context,
@@ -36,6 +37,12 @@ export type QueueListProps = {
    * headers at all.
    */
   showDayBuckets?: boolean;
+  /**
+   * "dense" drops the preview, the badges and the context line, leaving one
+   * line per message (plan.md, Phase 4). It is a per-view choice: a triage view
+   * wants the detail, a "Waiting Room" skim does not.
+   */
+  layout?: ViewLayout;
   onSelect: (index: number) => void;
   onOpen: (index: number) => void;
   onToggleDone: (item: QueueItem) => void;
@@ -46,6 +53,7 @@ export function QueueList({
   selectedIndex,
   nowIso,
   showDayBuckets = true,
+  layout = 'detailed',
   onSelect,
   onOpen,
   onToggleDone,
@@ -76,9 +84,14 @@ export function QueueList({
   }
 
   return (
-    <ul className="divide-y divide-neutral-200" data-testid="queue-list">
+    <ul
+      className="divide-y divide-neutral-200"
+      data-testid="queue-list"
+      data-layout={layout}
+    >
       {items.map((item, index) => {
         const isSelected = index === selectedIndex;
+        const isDense = layout === 'dense';
         const bucket = showDayBuckets
           ? formatDayBucket(item.sentAtIso, nowIso)
           : '';
@@ -110,7 +123,11 @@ export function QueueList({
                 : 'border-l-2 border-l-transparent hover:bg-neutral-50'
             }
           >
-            <div className="flex items-start gap-2 px-3 py-2.5">
+            <div
+              className={`flex items-start gap-2 px-3 ${
+                isDense ? 'py-1.5' : 'py-2.5'
+              }`}
+            >
               <button
                 type="button"
                 className="min-w-0 flex-1 text-left"
@@ -140,21 +157,29 @@ export function QueueList({
                   </span>
                 </div>
 
-                <p
-                  className={`mt-0.5 truncate text-sm ${
-                    item.isDone ? 'text-neutral-400' : 'text-neutral-600'
+                {isDense ? null : (
+                  <p
+                    className={`mt-0.5 truncate text-sm ${
+                      item.isDone ? 'text-neutral-400' : 'text-neutral-600'
+                    }`}
+                    data-testid="queue-item-preview"
+                  >
+                    {item.preview}
+                  </p>
+                )}
+
+                {isDense ? null : (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <TriageBadges item={item} />
+                    <BumpBadge item={item} nowIso={nowIso} />
+                  </div>
+                )}
+
+                <div
+                  className={`flex items-center gap-2 text-[11px] text-neutral-500 ${
+                    isDense ? '' : 'mt-1'
                   }`}
-                  data-testid="queue-item-preview"
                 >
-                  {item.preview}
-                </p>
-
-                <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                  <TriageBadges item={item} />
-                  <BumpBadge item={item} nowIso={nowIso} />
-                </div>
-
-                <div className="mt-1 flex items-center gap-2 text-[11px] text-neutral-500">
                   <span className="truncate">{item.contextLabel}</span>
                   {item.replyCount > 0 ? (
                     <span className="shrink-0">· {item.replyCount} replies</span>

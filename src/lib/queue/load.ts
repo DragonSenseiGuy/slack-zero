@@ -307,6 +307,7 @@ export async function loadInbox(
         displayName: true,
         avatarUrl: true,
         isBot: true,
+        isVip: true,
       },
       orderBy: { id: 'asc' },
     }),

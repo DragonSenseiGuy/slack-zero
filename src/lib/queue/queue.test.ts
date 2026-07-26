@@ -70,6 +70,7 @@ const USERS = new Map<string, QueueUser>([
       displayName: 'adi',
       avatarUrl: 'https://example.com/adi.png',
       isBot: false,
+      isVip: false,
     },
   ],
   [
@@ -81,6 +82,7 @@ const USERS = new Map<string, QueueUser>([
       displayName: '',
       avatarUrl: null,
       isBot: false,
+      isVip: false,
     },
   ],
   [
@@ -92,6 +94,7 @@ const USERS = new Map<string, QueueUser>([
       displayName: null,
       avatarUrl: null,
       isBot: true,
+      isVip: false,
     },
   ],
 ]);
@@ -262,6 +265,7 @@ describe('labels', () => {
         displayName: null,
         avatarUrl: null,
         isBot: false,
+        isVip: false,
       }),
     ).toBe('handle');
     expect(
@@ -272,6 +276,7 @@ describe('labels', () => {
         displayName: null,
         avatarUrl: null,
         isBot: false,
+        isVip: false,
       }),
     ).toBe('U1');
     expect(userLabel(null)).toBeNull();

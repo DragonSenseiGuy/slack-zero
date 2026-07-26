@@ -110,6 +110,7 @@ export async function loadTriageLookup(
         displayName: true,
         avatarUrl: true,
         isBot: true,
+        isVip: true,
       },
     }),
     prisma.conversation.findMany({ select: { id: true, name: true } }),

@@ -675,7 +675,72 @@ the accept step stops at the box. Revisit if a future model earns it.
 ---
 
 ## Phase 6: Snooze, Waiting-On, Follow-Ups
-**Status:** Not started
+**Status:** Done — all three verification items pass.
+
+**Verified 2026-07-26:**
+- `npm run test` → **524 tests / 22 files** (was 448/20); `npx tsc --noEmit`,
+  `npm run lint`, `npm run build` clean; `npm run test:e2e` → **29 passed,
+  1 skipped** (the skip is Phase 5's opt-in live send).
+- **Snooze reinjection scheduling (verification #1):** 29 unit tests. The
+  boundary is pinned explicitly — at exactly `snoozedUntil` the item is back,
+  because plan.md says "at/after"; late by a millisecond is fine, early is a bug.
+- **Early unsnooze on new activity (verification #2):** covered in the same
+  file, including the case that makes it correct rather than merely present —
+  activity is compared against `snoozedAt`, not `snoozedUntil`, so the message
+  that *prompted* the snooze does not immediately wake it.
+- **Waiting-on detection (verification #3):** 45 unit tests over a 22-entry
+  hand-labeled set, asserted exactly (no threshold). Plus behaviour tests: a
+  bump does not clear the ask it is chasing, a reaction counts as an answer, and
+  only same-thread replies answer a threaded ask.
+- 5 e2e tests for the round trip a unit test cannot cover: snooze removes the row
+  and it is still gone after a full reload, a past custom time is refused, and a
+  snoozed item is not resurrected by "show done".
+- Both jobs run clean against real data: `npm run waiting:scan` scanned 8
+  messages and reported 0 waiting-on, which is **correct** — every real message
+  is inbound, so the user has no outstanding asks. `npm run snooze:sweep --once`
+  found nothing due.
+
+**Design notes:**
+- **Waiting-on detection is rule-based, not model-based.** It runs over every
+  message the user has ever sent — exactly the high-volume per-message work
+  CLAUDE.md says not to spend a model on — and plan.md asks for it to be tested
+  "against labeled sample conversations", which a rule can satisfy exactly.
+  Phase 3 showed model output drifting between identical runs; a detector whose
+  pass rate moved on its own would be worthless as a regression guard.
+  The rules are deliberately conservative: a missed item is invisible, a false
+  one nags the user to chase something that was never a question, which is how a
+  follow-up feature gets switched off.
+- **"Answered" is defined structurally** — anyone other than the user speaking
+  later in the same thread (or conversation, if unthreaded). It cannot tell
+  whether the reply actually addressed the ask. Judging that is precisely the
+  per-message LLM work this module exists to avoid, so the limitation is
+  accepted and documented rather than papered over.
+- **Snooze is a sweep, not a timer per message.** A timer does not survive the
+  process closing, and this tool is closed overnight — which is exactly when a
+  "tomorrow morning" snooze elapses. The sweep is idempotent, so a missed run
+  costs latency and never correctness. It runs on inbox load *and* from
+  `npm run snooze:sweep`; the former covers "opened in the morning", the latter
+  "already open when the time arrives".
+- Snooze clears `isDone`: snoozing means "not now", which implies not handled.
+- "Waiting on Others" sets `includeDone` — an ask you triaged out of the inbox
+  is still an ask someone owes you an answer to.
+
+**Two bugs found while verifying:**
+1. **`NOT_AN_ASK` never matched anything.** The rhetorical-question patterns were
+   anchored with `$`, but the candidate sentences arrive with their terminating
+   `?` still attached, so "how are you?" was being reported as an outstanding
+   ask. Caught by the labeled set on its first run — exactly what the labeled set
+   is for. Fixed by stripping surrounding punctuation before matching.
+2. **`listViews()` only seeded built-ins when the table was empty.** That looks
+   equivalent to seeding what is missing and is not: "Waiting on Others" was
+   invisible on every database that already had views, which is every existing
+   install. Now seeds by absent name.
+
+**Also fixed:** the snooze picker had its own `window` key listener, which raced
+the inbox's global one — Escape both closed the menu and cleared the queue scope,
+non-deterministically. `InboxClient` owns the keyboard for the whole inbox now;
+one dispatcher, one outcome. `h` was reserved and asserted-unbound since Phase 2,
+so that guard moved rather than disappearing.
 
 **Objective:** Time-shifting and tracking outstanding asks.
 

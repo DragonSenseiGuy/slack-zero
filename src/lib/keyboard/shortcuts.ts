@@ -35,7 +35,9 @@ export type InboxAction =
   /** Ask the model for reply suggestions (Phase 5). */
   | { type: 'draftReply' }
   /** Put the cursor in the reply box (Phase 5). */
-  | { type: 'focusReply' };
+  | { type: 'focusReply' }
+  /** Open the snooze picker (Phase 6). */
+  | { type: 'snooze' };
 
 /**
  * The parts of a `KeyboardEvent` this module reads. Declared structurally so
@@ -145,6 +147,8 @@ export function resolveShortcut(
       return { type: 'draftReply' };
     case 'r':
       return { type: 'focusReply' };
+    case 'h':
+      return { type: 'snooze' };
     default:
       return null;
   }
@@ -183,4 +187,5 @@ export const SHORTCUT_HELP: ReadonlyArray<{ keys: string; description: string }>
     { keys: 'g / G', description: 'First / last message' },
     { keys: 'r', description: 'Reply' },
     { keys: 'd', description: 'Suggest replies' },
+    { keys: 'h', description: 'Snooze' },
   ];

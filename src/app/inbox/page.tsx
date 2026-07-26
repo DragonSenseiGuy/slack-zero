@@ -1,6 +1,7 @@
 import Link from 'next/link';
 
 import { loadInbox } from '@/lib/queue/load';
+import { runSnoozeSweeps } from '@/lib/snooze/actions';
 import { listViews } from '@/lib/views/actions';
 import { InboxClient } from '@/app/inbox/InboxClient';
 import type { SavedView } from '@/lib/views/filters';
@@ -21,6 +22,18 @@ export const metadata = {
 };
 
 export default async function InboxPage() {
+  // Wake anything whose snooze has elapsed, or whose thread has new activity,
+  // before reading the queue. The background job (`npm run snooze:sweep`) makes
+  // items reappear while the app is already open; this makes them reappear when
+  // it is opened, which is the case that matters for a tool closed overnight.
+  // Never allowed to break the page: an unswept snooze is a late item, not a
+  // broken inbox.
+  try {
+    await runSnoozeSweeps();
+  } catch {
+    // Intentionally ignored — see above.
+  }
+
   let data;
   try {
     data = await loadInbox();

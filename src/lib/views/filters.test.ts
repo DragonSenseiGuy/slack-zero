@@ -66,6 +66,9 @@ function item(overrides: ItemOverrides = {}): QueueItem {
     body: 'hello',
     isDone: false,
     doneAtIso: null,
+    snoozedUntilIso: null,
+    isWaitingOn: false,
+    waitingSinceIso: null,
     threadTs: null,
     isThreadReply: false,
     isThreadParent: false,
@@ -444,12 +447,24 @@ describe('parseViewFilters', () => {
 // ---------------------------------------------------------------------------
 
 describe('BUILT_IN_VIEWS', () => {
-  it('ships the three views plan.md names', () => {
+  it('ships the three views plan.md names, plus Phase 6’s waiting view', () => {
     expect(BUILT_IN_VIEWS.map((view) => view.name)).toEqual([
       'Needs Reply',
       'Waiting Room',
       'Everything',
+      // plan.md Phase 6: "separate view" for outstanding asks.
+      'Waiting on Others',
     ]);
+  });
+
+  it('"Waiting on Others" keeps done items — an ask is still outstanding', () => {
+    const waiting = BUILT_IN_VIEWS.find((v) => v.name === 'Waiting on Others');
+    const doneButWaiting = item({ isDone: true, isWaitingOn: true });
+    const notWaiting = item({ isWaitingOn: false });
+
+    expect(
+      ids(applyViewFilters([doneButWaiting, notWaiting], waiting!.filters)),
+    ).toEqual([doneButWaiting.id]);
   });
 
   it('uses only valid layouts, sorts and filters', () => {

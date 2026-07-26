@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { CommandPalette } from '@/app/inbox/CommandPalette';
 import { ReplyBox } from '@/app/inbox/ReplyBox';
+import { SnoozeMenu } from '@/app/inbox/SnoozeMenu';
 import { ViewBuilder } from '@/app/inbox/ViewBuilder';
 import { ViewSidebar } from '@/app/inbox/ViewSidebar';
 import { Kbd, QueueList } from '@/app/inbox/QueueList';
@@ -19,6 +20,8 @@ import type { PaletteEntry } from '@/lib/palette/search';
 import { filterPaletteEntries } from '@/lib/palette/search';
 import { setMessageDone } from '@/lib/queue/actions';
 import { draftReplies, sendReplyToMessage } from '@/lib/reply/actions';
+import { snoozeMessage } from '@/lib/snooze/actions';
+import type { SnoozePreset } from '@/lib/snooze/schedule';
 import type { ReplyDraft } from '@/lib/reply/draft';
 import { createView, deleteView, updateView } from '@/lib/views/actions';
 import {
@@ -130,6 +133,13 @@ export function InboxClient({
   const [replySentCount, setReplySentCount] = useState(0);
   /** Auto-mark done after sending. plan.md: configurable, on by default. */
   const [replyMarkDone, setReplyMarkDone] = useState(true);
+  /** Snooze picker (Phase 6). */
+  const [snoozeOpen, setSnoozeOpen] = useState(false);
+  const [snoozeBusy, setSnoozeBusy] = useState(false);
+  const [snoozeError, setSnoozeError] = useState<string | null>(null);
+  /** Ids hidden locally by a snooze the server has already accepted. */
+  const [snoozedIds, setSnoozedIds] = useState<Set<string>>(new Set());
+
   const [drafts, setDrafts] = useState<ReplyDraft[]>([]);
   const [draftsLoading, setDraftsLoading] = useState(false);
   const [draftsError, setDraftsError] = useState<string | null>(null);
@@ -147,13 +157,18 @@ export function InboxClient({
   // Server truth, with any in-flight local toggle applied on top.
   const effectiveItems = useMemo(
     () =>
-      items.map((item) => {
-        const override = overrides[item.id];
-        return override
-          ? { ...item, isDone: override.isDone, doneAtIso: override.doneAtIso }
-          : item;
-      }),
-    [items, overrides],
+      items
+        // A snooze the server has accepted but this render has not re-fetched.
+        // Dropping the row here rather than filtering later keeps the sidebar
+        // counts honest too.
+        .filter((item) => !snoozedIds.has(item.id))
+        .map((item) => {
+          const override = overrides[item.id];
+          return override
+            ? { ...item, isDone: override.isDone, doneAtIso: override.doneAtIso }
+            : item;
+        }),
+    [items, overrides, snoozedIds],
   );
 
   const activeView = useMemo(
@@ -452,6 +467,36 @@ export function InboxClient({
       .finally(() => setDraftsLoading(false));
   }, [selectedItem]);
 
+  const snooze = useCallback(
+    (preset: SnoozePreset, customIso?: string) => {
+      const target = selectedItem;
+      if (!target) return;
+
+      setSnoozeBusy(true);
+      setSnoozeError(null);
+
+      void snoozeMessage(target.id, { preset, customIso })
+        .then((result) => {
+          if (!result.ok) {
+            // Keep the picker open with the reason — "pick a time in the
+            // future" is actionable, and closing would lose the chosen time.
+            setSnoozeError(result.error);
+            return;
+          }
+          // Hide it locally straight away; the server has already stored it.
+          setSnoozedIds((current) => new Set(current).add(target.id));
+          setSnoozeOpen(false);
+        })
+        .catch((cause: unknown) => {
+          setSnoozeError(
+            cause instanceof Error ? cause.message : 'Could not snooze.',
+          );
+        })
+        .finally(() => setSnoozeBusy(false));
+    },
+    [selectedItem],
+  );
+
   const openSelected = useCallback(() => {
     if (!selectedItem) return;
     setMode('reading');
@@ -538,6 +583,13 @@ export function InboxClient({
           break;
 
         case 'back':
+          // The snooze picker is the innermost layer, so Escape closes it
+          // first — before the reading pane or the palette scope.
+          if (snoozeOpen) {
+            setSnoozeOpen(false);
+            setSnoozeError(null);
+            break;
+          }
           goBack();
           break;
 
@@ -570,6 +622,13 @@ export function InboxClient({
           requestDrafts();
           break;
 
+        case 'snooze':
+          if (selectedItem) {
+            setSnoozeError(null);
+            setSnoozeOpen(true);
+          }
+          break;
+
         case 'focusReply': {
           // `r` is a shortcut *into* the compose box; the box itself then owns
           // the keyboard, since `isTypingTarget` stands the shortcuts down.
@@ -597,6 +656,7 @@ export function InboxClient({
     closePalette,
     pickPaletteEntry,
     requestDrafts,
+    snoozeOpen,
   ]);
 
   // Keep the stored index in range when the list shrinks under the cursor
@@ -813,6 +873,19 @@ export function InboxClient({
           ))}
         </ul>
       </footer>
+
+      {snoozeOpen && selectedItem ? (
+        <SnoozeMenu
+          nowIso={nowIso}
+          busy={snoozeBusy}
+          error={snoozeError}
+          onSnooze={snooze}
+          onClose={() => {
+            setSnoozeOpen(false);
+            setSnoozeError(null);
+          }}
+        />
+      ) : null}
 
       {builder ? (
         <ViewBuilder

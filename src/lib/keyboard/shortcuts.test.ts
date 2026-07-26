@@ -81,7 +81,7 @@ describe('resolveShortcut — list mode', () => {
   });
 
   it('ignores unbound keys', () => {
-    for (const unbound of ['a', 'z', '1', 'F5', 'Tab', 'h']) {
+    for (const unbound of ['a', 'z', '1', 'F5', 'Tab']) {
       expect(resolveShortcut(key(unbound), inMode('list'))).toBeNull();
     }
   });
@@ -98,9 +98,14 @@ describe('resolveShortcut — list mode', () => {
     });
   });
 
-  it('still does not claim shortcuts reserved for later phases', () => {
-    // `h` is Phase 6 (snooze).
-    expect(resolveShortcut(key('h'), inMode('list'))).toBeNull();
+  it('binds the Phase 6 snooze key', () => {
+    // Reserved and asserted-unbound since Phase 2; Phase 6 is the phase that
+    // claims it, so the guard moves rather than disappearing.
+    expect(resolveShortcut(key('h'), inMode('list'))).toEqual({ type: 'snooze' });
+  });
+
+  it('stands snooze down while the user is typing', () => {
+    expect(resolveShortcut(key('h'), { mode: 'list', isTyping: true })).toBeNull();
   });
 
   it('stands the reply keys down while the user is typing', () => {

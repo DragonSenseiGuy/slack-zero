@@ -90,6 +90,11 @@ export type QueueMessageRow = {
    * /unread. Absent `MessageState` row means "not done". */
   isDone: boolean;
   doneAt: Date | null;
+  /** Phase 6. Null when never snoozed. */
+  snoozedUntil?: Date | null;
+  snoozedAt?: Date | null;
+  isWaitingOn?: boolean;
+  waitingOnSince?: Date | null;
 
   /** AI triage result, or null when this message has not been classified yet
    * (classification is async and must never block ingestion). */
@@ -156,6 +161,12 @@ export type QueueItem = {
 
   isDone: boolean;
   doneAtIso: string | null;
+
+  /** Phase 6: set while the item is hidden by a snooze. */
+  snoozedUntilIso: string | null;
+  /** Phase 6: the user asked something here and is awaiting a reply. */
+  isWaitingOn: boolean;
+  waitingSinceIso: string | null;
 
   threadTs: string | null;
   isThreadReply: boolean;
@@ -376,6 +387,9 @@ export function toQueueItem(
 
     isDone: row.isDone,
     doneAtIso: row.doneAt ? row.doneAt.toISOString() : null,
+    snoozedUntilIso: row.snoozedUntil ? row.snoozedUntil.toISOString() : null,
+    isWaitingOn: row.isWaitingOn ?? false,
+    waitingSinceIso: row.waitingOnSince ? row.waitingOnSince.toISOString() : null,
 
     threadTs: row.threadTs,
     isThreadReply: row.isThreadReply,

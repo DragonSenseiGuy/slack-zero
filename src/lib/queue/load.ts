@@ -93,7 +93,16 @@ const MESSAGE_SELECT = {
       peerUserId: true,
     },
   },
-  state: { select: { isDone: true, doneAt: true } },
+  state: {
+    select: {
+      isDone: true,
+      doneAt: true,
+      snoozedUntil: true,
+      snoozedAt: true,
+      isWaitingOn: true,
+      waitingOnSince: true,
+    },
+  },
   classification: {
     select: {
       urgencyScore: true,
@@ -135,7 +144,14 @@ type DbMessage = {
     name: string | null;
     peerUserId: string | null;
   };
-  state: { isDone: boolean; doneAt: Date | null } | null;
+  state: {
+    isDone: boolean;
+    doneAt: Date | null;
+    snoozedUntil: Date | null;
+    snoozedAt: Date | null;
+    isWaitingOn: boolean;
+    waitingOnSince: Date | null;
+  } | null;
   classification: {
     urgencyScore: number;
     category: DbMessageCategory;
@@ -185,6 +201,10 @@ function toQueueMessageRow(message: DbMessage): QueueMessageRow {
     conversation: message.conversation,
     isDone: message.state?.isDone ?? false,
     doneAt: message.state?.doneAt ?? null,
+    snoozedUntil: message.state?.snoozedUntil ?? null,
+    snoozedAt: message.state?.snoozedAt ?? null,
+    isWaitingOn: message.state?.isWaitingOn ?? false,
+    waitingOnSince: message.state?.waitingOnSince ?? null,
     triage: toTriage(message.classification),
   };
 }

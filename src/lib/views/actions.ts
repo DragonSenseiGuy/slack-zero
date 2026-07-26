@@ -87,10 +87,24 @@ export async function listViews(): Promise<SavedView[]> {
     orderBy: [{ position: 'asc' }, { name: 'asc' }],
   });
 
-  if (existing.length > 0) return existing.map(toSavedView);
+  // Seed any built-in that is *missing*, not just on a wholly empty table.
+  //
+  // Seeding only when empty looks equivalent and is not: it means a built-in
+  // added in a later phase never appears for anyone whose database already has
+  // views. Phase 6 added "Waiting on Others" and it was invisible on every
+  // existing install until this was fixed.
+  //
+  // Only absent names are created, so a built-in the user has since edited is
+  // left exactly as they left it, and a built-in they deleted stays deleted for
+  // the length of this call — `deleteView` refuses built-ins precisely because
+  // this would otherwise resurrect them.
+  const present = new Set(existing.map((view) => view.name));
+  const missing = BUILT_IN_VIEWS.filter((view) => !present.has(view.name));
+
+  if (missing.length === 0) return existing.map(toSavedView);
 
   await prisma.viewDefinition.createMany({
-    data: BUILT_IN_VIEWS.map((view) => ({
+    data: missing.map((view) => ({
       name: view.name,
       layout: view.layout,
       sort: view.sort,

@@ -87,6 +87,13 @@ export type ViewFilters = {
   minUrgency?: number;
   /** False (default) is inbox-zero behaviour: done items are hidden. */
   includeDone?: boolean;
+  /**
+   * Show items that are currently snoozed (Phase 6). Hidden by default —
+   * removing the item from the queue until its time is the entire feature.
+   */
+  includeSnoozed?: boolean;
+  /** Only messages the user is waiting on a reply to (Phase 6). */
+  waitingOnly?: boolean;
   /** Restrict to one conversation or one person. */
   scope?: QueueScope | null;
 };
@@ -116,6 +123,8 @@ export const viewFiltersSchema = z.object({
   classifiedOnly: z.boolean().optional(),
   minUrgency: z.number().int().min(0).max(100).optional(),
   includeDone: z.boolean().optional(),
+  includeSnoozed: z.boolean().optional(),
+  waitingOnly: z.boolean().optional(),
   scope: scopeSchema.nullish(),
 });
 
@@ -161,6 +170,13 @@ export function matchesViewFilters(
   filters: ViewFilters = {},
 ): boolean {
   if (!filters.includeDone && item.isDone) return false;
+
+  // A snoozed item is out of the queue until its time comes or its thread wakes
+  // it. `snoozedUntilIso` is only ever set while the snooze is still pending —
+  // the sweeps clear it — so its presence is the whole test.
+  if (!filters.includeSnoozed && item.snoozedUntilIso !== null) return false;
+
+  if (filters.waitingOnly && !item.isWaitingOn) return false;
 
   if (!matchesScope(item, filters.scope)) return false;
 
@@ -316,6 +332,21 @@ export const BUILT_IN_VIEWS: readonly ViewSpec[] = [
     sort: 'urgency',
     position: 2,
   },
+  /**
+   * Phase 6's "separate view" for outstanding asks.
+   *
+   * `includeDone` is on: an ask you already triaged out of the inbox is still an
+   * ask someone owes you an answer to, and hiding it here would make the view
+   * lie about what you are waiting for. Oldest first, because the stalest ask is
+   * the one worth chasing.
+   */
+  {
+    name: 'Waiting on Others',
+    layout: 'dense',
+    filters: { waitingOnly: true, includeDone: true },
+    sort: 'oldest',
+    position: 3,
+  },
 ] as const;
 
 export const DEFAULT_VIEW_NAME = 'Everything';
@@ -331,6 +362,8 @@ export function describeFilters(filters: ViewFilters): string {
     parts.push(filters.reasons!.map((r) => REASON_LABEL[r]).join(' or '));
   }
   if (filters.vipOnly) parts.push('VIP only');
+  if (filters.waitingOnly) parts.push('waiting on a reply');
+  if (filters.includeSnoozed) parts.push('including snoozed');
   if (filters.hasBump) parts.push('bumped');
   if (filters.classifiedOnly) parts.push('classified');
   if (filters.minUrgency !== undefined) {

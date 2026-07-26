@@ -765,7 +765,47 @@ so that guard moved rather than disappearing.
 ---
 
 ## Phase 7: Analytics & Stats
-**Status:** Not started
+**Status:** Done — both verification items pass.
+
+**Verified 2026-07-26:**
+- `npm run test` → **561 tests / 23 files** (was 524/22); `npx tsc --noEmit`,
+  `npm run lint`, `npm run build` clean; `npm run test:e2e` → **34 passed,
+  1 skipped** (the skip is Phase 5's opt-in live send).
+- **Response-time calculation (verification #1):** 37 unit tests against fixture
+  data with fixed timestamps. Every expected duration is written out rather than
+  recomputed — a test that derives the value it checks proves nothing.
+- **Dashboard renders with real data (verification #2):** 5 e2e tests at
+  `/stats`, asserting HTTP 200, no `console.error`, and no uncaught page
+  exception. Includes the round trip that makes it a measurement rather than a
+  layout: mark an item done in the inbox, reload the dashboard, confirm the
+  triaged count went up by exactly one.
+- Rendered against the live database: 8 open, 0 waiting on, median response `—`
+  (nothing triaged yet), 14-day series present.
+
+**Design notes:**
+- **Median is the headline, not mean.** Response times are heavily skewed — a
+  handful of messages cleared after a holiday drags a mean far above anything the
+  user recognises as their turnaround. Mean and p90 are shown alongside, because
+  the gap between them is itself informative.
+- **Nulls render as `—`, never as `0`.** A zero response time claims an instant
+  turnaround; on a fresh install that is a lie. There is a dedicated e2e test
+  asserting the empty state never shows `0s` or `NaN`.
+- **`triaged` counts by when an item was *done*; `received` counts by arrival.**
+  Those answer different questions ("how much did I get through today" vs "how
+  much came in"), so both are reported rather than one standing in for the other.
+  A message from last week cleared this morning is part of today's work.
+- **Negative durations are clamped to zero.** Slack's `ts` is the sender's clock
+  and `doneAt` is this machine's; they disagree by a second or two routinely, and
+  one negative value would drag an average below zero.
+- Quiet days appear in the series as zero-height bars rather than being omitted —
+  a gap reads as missing data, a zero reads as a quiet day, and only one is true.
+- The chart is CSS divs, not a charting library: plan.md asks for a "simple stats
+  dashboard page", and a dependency plus a client bundle is not that.
+- **Reply time is approximated structurally** — the first message the user sent
+  in that conversation after the incoming one. It cannot tell whether that
+  message actually answered it. This is the same simplification Phase 6 makes for
+  waiting-on, for the same reason: judging it per message is exactly the
+  high-volume LLM work CLAUDE.md rules out.
 
 **Objective:** Superhuman-style stats to build the habit and show impact.
 

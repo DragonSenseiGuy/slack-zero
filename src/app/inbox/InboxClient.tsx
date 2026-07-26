@@ -720,6 +720,13 @@ export function InboxClient({
         ) : null}
 
         <div className="ml-auto flex items-center gap-2">
+          <Link
+            href="/stats"
+            data-testid="stats-link"
+            className="rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50"
+          >
+            Stats
+          </Link>
           <button
             type="button"
             onClick={() => {

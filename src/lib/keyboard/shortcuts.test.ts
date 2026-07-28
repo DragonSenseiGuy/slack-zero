@@ -8,12 +8,6 @@ import {
   type KeyEventLike,
 } from '@/lib/keyboard/shortcuts';
 
-/**
- * The keyboard mapping is the product in Phase 2 — a wrong dispatch is not a
- * cosmetic bug, it is data loss (`e` marking the wrong thing done) or a dead
- * app. Hence exhaustive fixtures rather than a couple of happy paths.
- */
-
 function key(k: string, modifiers: Partial<KeyEventLike> = {}): KeyEventLike {
   return { key: k, ...modifiers };
 }
@@ -87,9 +81,6 @@ describe('resolveShortcut — list mode', () => {
   });
 
   it('binds the Phase 5 reply keys', () => {
-    // Phase 2 left `r` and `d` deliberately unbound and asserted it, so that a
-    // key could not mean two different things across phases. Phase 5 is the
-    // phase that claims them, so the guard moves rather than disappears.
     expect(resolveShortcut(key('r'), inMode('list'))).toEqual({
       type: 'focusReply',
     });
@@ -102,13 +93,10 @@ describe('resolveShortcut — list mode', () => {
     expect(resolveShortcut(key('?'), inMode('list'))).toEqual({
       type: 'toggleHelp',
     });
-    // And stands down while typing, so "why?" in a reply does not open it.
     expect(resolveShortcut(key('?'), { mode: 'list', isTyping: true })).toBeNull();
   });
 
   it('documents every binding it resolves', () => {
-    // The overlay and the footer both render SHORTCUT_HELP, so a key that
-    // resolves but is undocumented would be invisible to the user.
     const documented = SHORTCUT_HELP.map((entry) => entry.keys).join(' ');
     for (const k of ['j', 'k', 'e', 'u', 's', 'r', 'd', 'h', '?']) {
       expect(documented, `${k} is bound but undocumented`).toContain(k);
@@ -116,8 +104,6 @@ describe('resolveShortcut — list mode', () => {
   });
 
   it('binds the Phase 6 snooze key', () => {
-    // Reserved and asserted-unbound since Phase 2; Phase 6 is the phase that
-    // claims it, so the guard moves rather than disappearing.
     expect(resolveShortcut(key('h'), inMode('list'))).toEqual({ type: 'snooze' });
   });
 
@@ -147,38 +133,16 @@ describe('resolveShortcut — modifiers', () => {
     ).toBeNull();
   });
 
-  it('opens the palette on ⌘K and on Ctrl+K', () => {
-    expect(resolveShortcut(key('k', { metaKey: true }), inMode('list'))).toEqual(
-      { type: 'openPalette' },
-    );
-    expect(resolveShortcut(key('k', { ctrlKey: true }), inMode('list'))).toEqual(
-      { type: 'openPalette' },
-    );
-  });
-
-  it('accepts an uppercase K in the chord (Shift held)', () => {
+  it('leaves ⌘K to the browser now that the jump-to palette is gone', () => {
     expect(
-      resolveShortcut(key('K', { metaKey: true, shiftKey: true }), inMode('list')),
-    ).toEqual({ type: 'openPalette' });
-  });
-
-  it('does not treat Alt+⌘K as the palette chord', () => {
-    expect(
-      resolveShortcut(key('k', { metaKey: true, altKey: true }), inMode('list')),
+      resolveShortcut(key('k', { metaKey: true }), inMode('list')),
     ).toBeNull();
-  });
-
-  it('toggles the palette shut when the chord is pressed again', () => {
     expect(
-      resolveShortcut(key('k', { metaKey: true }), inMode('palette')),
-    ).toEqual({ type: 'closePalette' });
-  });
-
-  it('opens the palette even while typing in a text field', () => {
-    // Otherwise ⌘K would be dead in any input, which is where users reach for it.
+      resolveShortcut(key('k', { ctrlKey: true }), inMode('list')),
+    ).toBeNull();
     expect(
       resolveShortcut(key('k', { metaKey: true }), inMode('list', true)),
-    ).toEqual({ type: 'openPalette' });
+    ).toBeNull();
   });
 });
 
@@ -203,36 +167,9 @@ describe('resolveShortcut — reading mode', () => {
   });
 });
 
-describe('resolveShortcut — palette mode', () => {
-  it('moves the highlight with the arrow keys', () => {
-    expect(resolveShortcut(key('ArrowDown'), inMode('palette'))).toEqual({
-      type: 'move',
-      delta: 1,
-    });
-    expect(resolveShortcut(key('ArrowUp'), inMode('palette'))).toEqual({
-      type: 'move',
-      delta: -1,
-    });
-  });
-
-  it('picks the highlighted entry on Enter', () => {
-    expect(resolveShortcut(key('Enter'), inMode('palette'))).toEqual({
-      type: 'palettePick',
-    });
-  });
-
-  it('closes on Escape', () => {
-    expect(resolveShortcut(key('Escape'), inMode('palette'))).toEqual({
-      type: 'closePalette',
-    });
-  });
-
-  it('lets ordinary letters through to the search input', () => {
-    // Critical: typing "jek" into the palette must not navigate the queue and
-    // mark something done behind the dialog.
-    for (const letter of ['j', 'k', 'e', 'g', 'u']) {
-      expect(resolveShortcut(key(letter), inMode('palette'))).toBeNull();
-    }
+describe('SHORTCUT_HELP', () => {
+  it('does not advertise the removed palette chord', () => {
+    expect(SHORTCUT_HELP.some((entry) => entry.keys.includes('K'))).toBe(false);
   });
 });
 
@@ -291,7 +228,7 @@ describe('isTypingTarget', () => {
 describe('SHORTCUT_HELP', () => {
   it('documents every shortcut plan.md names for this phase', () => {
     const documented = SHORTCUT_HELP.map((entry) => entry.keys).join(' ');
-    for (const expected of ['j / k', 'Enter', 'e', 'Esc', '⌘K']) {
+    for (const expected of ['j / k', 'Enter', 'e', 'Esc', 's', 'u', '?']) {
       expect(documented).toContain(expected);
     }
   });

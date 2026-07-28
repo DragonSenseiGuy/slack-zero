@@ -4,21 +4,16 @@ import { forwardRef, useEffect, useState } from 'react';
 
 import type { QueueItem } from '@/lib/queue/queue';
 import { effectiveUrgency } from '@/lib/queue/queue';
-import { bumpStalenessLabel, formatRelativeTime } from '@/lib/queue/time';
+import {
+  bumpStalenessLabel,
+  burstSpanLabel,
+  formatRelativeTime,
+  snoozeStatusLabel,
+} from '@/lib/queue/time';
+import { ConversationContext } from '@/app/inbox/ConversationContext';
 import { Kbd } from '@/app/inbox/QueueList';
 import { CategoryBadge, UrgencyBadge } from '@/app/inbox/TriageBadges';
 
-/**
- * The reading pane of the split view: full content of the selected message
- * without leaving the queue (plan.md, Phase 2). The list keeps its scroll
- * position and its selection because nothing here navigates.
- */
-
-/**
- * Absolute timestamps are locale- and timezone-dependent, so rendering one
- * during SSR guarantees a hydration mismatch. Render nothing on the server,
- * fill it in after mount.
- */
 function useLocalTimestamp(iso: string): string | null {
   const [label, setLabel] = useState<string | null>(null);
 
@@ -37,15 +32,6 @@ function useLocalTimestamp(iso: string): string | null {
   return label;
 }
 
-/**
- * Why this message is where it is in the queue.
- *
- * CLAUDE.md requires the model's `reason` be stored alongside every score
- * "for debugging and building trust in the sorting, not optional metadata".
- * Storing it and never showing it would satisfy the letter and miss the point,
- * so it is rendered here, with the model that produced it — a score you cannot
- * argue with is a score you cannot trust.
- */
 function TriageExplainer({ item, nowIso }: { item: QueueItem; nowIso: string }) {
   const urgency = effectiveUrgency(item);
 
@@ -99,23 +85,57 @@ function TriageExplainer({ item, nowIso }: { item: QueueItem; nowIso: string }) 
   );
 }
 
+/**
+ * Says, in the pane itself, that this is a reminder rather than something that
+ * just arrived — and when the user asked for it back.
+ */
+function SnoozeNote({ item, nowIso }: { item: QueueItem; nowIso: string }) {
+  const localUntil = useLocalTimestamp(item.snooze?.untilIso ?? '');
+  if (!item.snooze) return null;
+
+  const isPending = item.snooze.state === 'pending';
+
+  return (
+    <p
+      data-testid="snooze-note"
+      data-snooze-state={item.snooze.state}
+      data-snooze-reason={item.snooze.returnedReason ?? ''}
+      className={`mb-4 rounded border px-3 py-2 text-xs ${
+        isPending
+          ? 'border-neutral-200 bg-neutral-50 text-neutral-600'
+          : 'border-indigo-200 bg-indigo-50 text-indigo-900'
+      }`}
+    >
+      <span className="font-medium">
+        ⏰ {snoozeStatusLabel(item.snooze, nowIso)}
+      </span>
+      {localUntil ? (
+        <span className="ml-1 text-neutral-500">
+          {isPending ? 'Due' : 'You snoozed it until'} {localUntil}.
+        </span>
+      ) : null}
+    </p>
+  );
+}
+
+export type SentReply = {
+  ts: string;
+  body: string;
+  sentAtIso: string;
+};
+
 export type ReadingPaneProps = {
   item: QueueItem | null;
   nowIso: string;
   isFocused: boolean;
   onToggleDone: (item: QueueItem) => void;
-  /**
-   * The reply box (Phase 5), passed in rather than built here.
-   *
-   * Keeps the pane a pure renderer of a message: sending state, drafts and
-   * rollback all live with the rest of the mutation logic in `InboxClient`.
-   */
+  sentReplies?: readonly SentReply[];
   replySlot?: React.ReactNode;
 };
 
 export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
   function ReadingPane(
-    { item, nowIso, isFocused, onToggleDone, replySlot },
+    { item, nowIso, isFocused, onToggleDone, sentReplies = [], replySlot },
     ref,
   ) {
     const localTime = useLocalTimestamp(item?.sentAtIso ?? '');
@@ -179,7 +199,8 @@ export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
                   : 'border-neutral-300 text-neutral-700 hover:bg-neutral-50'
               }`}
             >
-              {item.isDone ? 'Done ✓ — undo' : 'Mark done'} <Kbd>e</Kbd>
+              {item.isDone ? 'Completed ✓ — undo' : 'Mark as complete'}{' '}
+              <Kbd>e</Kbd>
             </button>
             {item.isEdited ? (
               <span className="text-xs text-neutral-500">edited</span>
@@ -189,7 +210,47 @@ export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="max-w-3xl px-6 py-5">
+            <SnoozeNote item={item} nowIso={nowIso} />
+
             <TriageExplainer item={item} nowIso={nowIso} />
+
+            <ConversationContext item={item} nowIso={nowIso} />
+
+          {item.group ? (
+            <p
+              className="mb-2 text-xs text-violet-800"
+              data-testid="group-note"
+            >
+              One task ·{' '}
+              {burstSpanLabel(
+                item.group.messageCount,
+                item.group.firstMessageAtIso,
+                nowIso,
+              )}
+              . Marking it as complete covers all of them.
+            </p>
+          ) : null}
+
+          {item.group ? (
+            <ol
+              className="mb-4 space-y-3 border-l-2 border-violet-200 pl-4"
+              data-testid="reading-pane-earlier"
+            >
+              {item.group.earlier.map((earlier) => (
+                <li key={earlier.id} data-testid="earlier-message">
+                  <span
+                    className="font-mono text-[11px] text-neutral-400"
+                    title={earlier.sentAtIso}
+                  >
+                    {formatRelativeTime(earlier.sentAtIso, nowIso)} ago
+                  </span>
+                  <p className="whitespace-pre-wrap break-words text-sm text-neutral-600">
+                    {earlier.body}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          ) : null}
 
           <p
             className="whitespace-pre-wrap break-words text-[15px] leading-relaxed text-neutral-800"
@@ -233,6 +294,29 @@ export const ReadingPane = forwardRef<HTMLElement, ReadingPaneProps>(
                     </div>
                     <p className="whitespace-pre-wrap break-words text-sm text-neutral-700">
                       {reply.body}
+                    </p>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+
+          {sentReplies.length > 0 ? (
+            <div className="mt-6" data-testid="reading-pane-sent">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                You sent
+              </h3>
+              <ol className="mt-2 space-y-3 border-l-2 border-emerald-200 pl-4">
+                {sentReplies.map((sent) => (
+                  <li key={sent.ts} data-testid="sent-reply" data-ts={sent.ts}>
+                    <span
+                      className="font-mono text-[11px] text-neutral-400"
+                      title={sent.sentAtIso}
+                    >
+                      {formatRelativeTime(sent.sentAtIso, nowIso)} ago
+                    </span>
+                    <p className="whitespace-pre-wrap break-words text-sm text-neutral-800">
+                      {sent.body}
                     </p>
                   </li>
                 ))}

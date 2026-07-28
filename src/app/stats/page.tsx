@@ -9,13 +9,6 @@ import {
   type TriageSummary,
 } from '@/lib/stats/compute';
 
-/**
- * The stats dashboard (plan.md, Phase 7).
- *
- * A server component: the whole page is a database read plus pure arithmetic
- * from `lib/stats/compute.ts`, so there is nothing for the client to do.
- */
-
 export const dynamic = 'force-dynamic';
 
 export const metadata = {
@@ -67,7 +60,7 @@ function SummaryBlock({
         <Stat
           label="Triaged"
           value={String(summary.triaged)}
-          hint="marked done in this window"
+          hint="marked as complete in this window"
           testId={`${testId}-triaged`}
         />
         <Stat
@@ -101,13 +94,6 @@ function SummaryBlock({
   );
 }
 
-/**
- * A bar chart in CSS, deliberately.
- *
- * A charting library would be a dependency and a client bundle for what is a
- * list of divs with a height. plan.md's Phase 7 asks for a "simple stats
- * dashboard page"; this is the simple version that stays a server component.
- */
 function Sparkline({ series }: { series: DailyPoint[] }) {
   const peak = Math.max(1, ...series.map((point) => point.triaged));
 
@@ -134,8 +120,6 @@ function Sparkline({ series }: { series: DailyPoint[] }) {
                     ? 'rounded-sm bg-violet-500'
                     : 'rounded-sm bg-neutral-200'
                 }
-                // A zero day still gets a sliver, so the axis reads as a row of
-                // days rather than as missing data.
                 style={{ height: point.triaged > 0 ? `${Math.max(heightPct, 6)}%` : '2px' }}
               />
             </li>
@@ -226,7 +210,8 @@ export default async function StatsPage() {
 
       <p className="mt-8 text-[11px] text-neutral-400">
         Response time is measured from when a message arrived to when you marked
-        it done. Messages you sent yourself are excluded. Data covers the last 30
+        it as complete. Messages you sent yourself are excluded. Data covers the
+        last 30
         days.
       </p>
     </main>

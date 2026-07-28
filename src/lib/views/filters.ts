@@ -4,6 +4,7 @@ import {
   compareByRecency,
   compareByUrgency,
   collapseBumpChains,
+  collapseBursts,
   matchesScope,
   type QueueItem,
   type QueueReason,
@@ -60,9 +61,28 @@ export type ViewSort = (typeof VIEW_SORTS)[number];
 export const SORT_LABEL: Record<ViewSort, string> = {
   newest: 'Newest first',
   oldest: 'Oldest first',
-  urgency: 'Urgency',
+  urgency: 'Most urgent first',
   vip_unread_first: 'VIP unreads on top',
 };
+
+/**
+ * The next order the `s` key should step to.
+ *
+ * The header control cycles through *every* sort a view can specify, not a
+ * separate two-mode toggle. Before this, a view saved with `oldest` or
+ * `vip_unread_first` silently ignored the header — the header would read
+ * "Sort: Urgency" over a list ordered oldest-first, which is a UI that lies
+ * about its own state.
+ */
+export function nextViewSort(sort: ViewSort): ViewSort {
+  const index = VIEW_SORTS.indexOf(sort);
+  return VIEW_SORTS[(index + 1) % VIEW_SORTS.length];
+}
+
+/** True when a list in this order is chronological, so day headers make sense. */
+export function isChronologicalSort(sort: ViewSort): boolean {
+  return sort === 'newest' || sort === 'oldest';
+}
 
 /**
  * A filter set.
@@ -246,6 +266,12 @@ export type SortForViewOptions = {
    * regardless of which view you are looking at.
    */
   collapseBumps?: boolean;
+  /**
+   * Same for same-sender bursts. A view is a lens on the queue, not a different
+   * queue — "one person, one row" cannot hold in the default view and quietly
+   * stop holding in Needs Reply.
+   */
+  groupBursts?: boolean;
 };
 
 export function sortForView(
@@ -253,10 +279,13 @@ export function sortForView(
   sort: ViewSort,
   options: SortForViewOptions = {},
 ): QueueItem[] {
-  const rows =
-    options.collapseBumps === false
+  const grouped =
+    options.groupBursts === false
       ? items.map((item) => ({ ...item }))
-      : collapseBumpChains(items);
+      : collapseBursts(items);
+
+  const rows =
+    options.collapseBumps === false ? grouped : collapseBumpChains(grouped);
 
   return rows.sort(COMPARATORS[sort]);
 }
@@ -370,7 +399,7 @@ export function describeFilters(filters: ViewFilters): string {
     parts.push(`urgency ≥ ${filters.minUrgency}`);
   }
   if (filters.scope) parts.push(filters.scope.label);
-  if (filters.includeDone) parts.push('including done');
+  if (filters.includeDone) parts.push('including completed');
 
   return parts.length === 0 ? 'Everything' : parts.join(' · ');
 }

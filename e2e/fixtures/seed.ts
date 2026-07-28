@@ -22,6 +22,20 @@ export const FIXTURE_CHANNEL_NAME = 'e2e-seed';
 export const FIXTURE_USER_ID = 'UE2ESEED001';
 export const FIXTURE_USER_LABEL = 'E2E Fixture Sender';
 
+/**
+ * A second voice in the fixture channel, whose messages never mention the user
+ * and so never enter the queue.
+ *
+ * They are not decoration. Consecutive messages from one sender are one queue
+ * row now — a person talking at you is one task, not six — so six fixture
+ * messages from one sender with nothing in between would render as a single
+ * item and take the filter and navigation suites with it. Interleaving someone
+ * else restores what the fixtures always assumed: six separate things to
+ * triage.
+ */
+export const FIXTURE_BYSTANDER_ID = 'UE2EGAP0001';
+export const FIXTURE_BYSTANDER_LABEL = 'E2E Bystander';
+
 /** Base instant for the fixtures: fixed, so `ts` values never drift. */
 const BASE_EPOCH_SECONDS = Math.floor(
   Date.UTC(2026, 6, 20, 12, 0, 0) / 1000,
@@ -51,6 +65,16 @@ export const FIXTURE_THREAD_REPLIES = [
   { offset: 72, text: 'E2E thread reply two' },
 ] as const;
 
+/**
+ * Channel chatter from someone else, sitting between each pair of fixture
+ * messages. No mention, so none of these reach the queue — their only job is to
+ * end the sender's run, keeping the six fixture messages six rows.
+ */
+const FIXTURE_GAP_MESSAGES = FIXTURE_MESSAGES.slice(1).map((message, index) => ({
+  offset: message.offset - 5,
+  text: `E2E bystander chatter ${index + 1}`,
+}));
+
 /** Total number of *top-level* queue items the fixtures produce. */
 export const FIXTURE_ITEM_COUNT = FIXTURE_MESSAGES.length + 1;
 
@@ -65,9 +89,61 @@ const prisma = new PrismaClient();
 function fixtureMessageIds(): string[] {
   return [
     ...FIXTURE_MESSAGES.map((_, index) => `me2e-msg-${index}`),
+    ...FIXTURE_GAP_MESSAGES.map((_, index) => `me2e-gap-${index}`),
+    ...BURST_MESSAGES.map((_, index) => `me2e-burst-${index}`),
+    'me2e-burst-gap',
     'me2e-thread-parent',
     ...FIXTURE_THREAD_REPLIES.map((_, index) => `me2e-thread-reply-${index}`),
+    ...FIXTURE_DM_MESSAGE_IDS,
+    LATE_MESSAGE_ID,
   ];
+}
+
+/** A message that "arrives" after the page has already rendered. */
+export const LATE_MESSAGE_ID = 'me2e-late';
+export const LATE_MESSAGE_TEXT = 'E2E hotel — arrived after the page loaded';
+
+/**
+ * Write a new mention into the fixture channel, as Socket Mode would.
+ *
+ * Deliberately writes to the database rather than replaying a Slack event: the
+ * listener is a separate process, and what an open tab actually watches is the
+ * database. This is the same path a real incoming DM takes on its last hop.
+ *
+ * Sent by the *bystander*, unlike every other fixture: a message from the usual
+ * sender would land next to their last one with nothing in between and collapse
+ * into that burst — one person talking at you is one row — so the arrival would
+ * be real but invisible as a new item.
+ */
+export async function deliverLateMessage(authedUserId: string): Promise<void> {
+  const sentAt = new Date();
+  await prisma.message.create({
+    data: {
+      id: LATE_MESSAGE_ID,
+      conversationId: FIXTURE_CHANNEL_ID,
+      userId: FIXTURE_BYSTANDER_ID,
+      source: 'EVENT',
+      ts: `${Math.floor(sentAt.getTime() / 1000)}.000200`,
+      sentAt,
+      text: `<@${authedUserId}> ${LATE_MESSAGE_TEXT}`,
+      mentionedUserIds: [authedUserId],
+    },
+  });
+}
+
+/**
+ * Backdate a snooze so its wake-up is due now.
+ *
+ * The alternative — snoozing for the shortest real preset and waiting — would
+ * make the test take hours. What is under test is that the sweep runs on its
+ * own and the tab hears about it, not the arithmetic of the presets (which has
+ * its own unit tests).
+ */
+export async function expireSnooze(messageId: string): Promise<void> {
+  await prisma.messageState.update({
+    where: { messageId },
+    data: { snoozedUntil: new Date(Date.now() - 60_000) },
+  });
 }
 
 /**
@@ -93,9 +169,11 @@ export async function getAuthedUserId(): Promise<string | null> {
 export async function clearInboxFixtures(): Promise<void> {
   await prisma.message.deleteMany({ where: { id: { in: fixtureMessageIds() } } });
   await prisma.conversation.deleteMany({
-    where: { id: FIXTURE_CHANNEL_ID },
+    where: { id: { in: [FIXTURE_CHANNEL_ID, FIXTURE_DM_ID] } },
   });
-  await prisma.user.deleteMany({ where: { id: FIXTURE_USER_ID } });
+  await prisma.user.deleteMany({
+    where: { id: { in: [FIXTURE_USER_ID, FIXTURE_BYSTANDER_ID] } },
+  });
   // Views the Phase 4 suite creates. Built-ins are left alone: they are
   // re-seeded by `listViews()` and deleting them is refused anyway.
   await prisma.viewDefinition.deleteMany({
@@ -130,6 +208,21 @@ export const FIXTURE_CATEGORIES = {
   'me2e-msg-5': { category: 'MISC' as const, urgencyScore: 5 },
 } as const;
 
+/**
+ * Three messages in a row from the fixture sender, seeded *after* the ordinary
+ * fixtures so nothing interrupts them. They are the burst: one task, one row.
+ *
+ * Opt-in via `seedBurstFixture` rather than part of the standard seed, so the
+ * suites that count rows do not have to know about them.
+ */
+export const BURST_MESSAGES = [
+  { offset: 100, text: 'E2E burst one — hey, are you around?' },
+  { offset: 101, text: 'E2E burst two — following up on the migration' },
+  { offset: 102, text: 'E2E burst three — need this before the release' },
+] as const;
+
+export const BURST_NEWEST_TEXT = BURST_MESSAGES[BURST_MESSAGES.length - 1].text;
+
 export const FIXTURE_ACTION_NEEDED_COUNT = 2;
 export const FIXTURE_FYI_MISC_COUNT = 4;
 /** The one row deliberately left without a Classification. */
@@ -147,14 +240,23 @@ export async function setFixtureSenderVip(isVip: boolean): Promise<void> {
 export async function seedInboxFixtures(authedUserId: string): Promise<void> {
   await clearInboxFixtures();
 
-  await prisma.user.create({
-    data: {
-      id: FIXTURE_USER_ID,
-      username: 'e2e-fixture',
-      realName: FIXTURE_USER_LABEL,
-      displayName: FIXTURE_USER_LABEL,
-      isBot: false,
-    },
+  await prisma.user.createMany({
+    data: [
+      {
+        id: FIXTURE_USER_ID,
+        username: 'e2e-fixture',
+        realName: FIXTURE_USER_LABEL,
+        displayName: FIXTURE_USER_LABEL,
+        isBot: false,
+      },
+      {
+        id: FIXTURE_BYSTANDER_ID,
+        username: 'e2e-bystander',
+        realName: FIXTURE_BYSTANDER_LABEL,
+        displayName: FIXTURE_BYSTANDER_LABEL,
+        isBot: false,
+      },
+    ],
   });
 
   await prisma.conversation.create({
@@ -181,6 +283,14 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
         sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
         text: `<@${authedUserId}> ${message.text}`,
         mentionedUserIds: [authedUserId],
+      })),
+      ...FIXTURE_GAP_MESSAGES.map((message, index) => ({
+        ...common,
+        userId: FIXTURE_BYSTANDER_ID,
+        id: `me2e-gap-${index}`,
+        ts: fixtureTs(message.offset),
+        sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
+        text: message.text,
       })),
       {
         ...common,
@@ -222,6 +332,55 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
 }
 
 /**
+ * Add the burst: three consecutive messages from the fixture sender.
+ *
+ * Left unclassified on purpose — grouping is decided from the transcript, never
+ * by the model, so the row has to collapse with no `Classification` rows in
+ * sight.
+ */
+export async function seedBurstFixture(authedUserId: string): Promise<void> {
+  await prisma.message.createMany({
+    data: [
+      // Someone else speaks first, so the burst is a run of its own rather than
+      // a continuation of the last ordinary fixture message — which is itself
+      // from this sender, with nothing in between.
+      {
+        conversationId: FIXTURE_CHANNEL_ID,
+        userId: FIXTURE_BYSTANDER_ID,
+        source: 'BACKFILL' as const,
+        id: 'me2e-burst-gap',
+        ts: fixtureTs(BURST_MESSAGES[0].offset - 5),
+        sentAt: new Date(
+          (BASE_EPOCH_SECONDS + BURST_MESSAGES[0].offset - 5) * 1000,
+        ),
+        text: 'E2E bystander chatter before the burst',
+      },
+      ...BURST_MESSAGES.map((message, index) => ({
+        conversationId: FIXTURE_CHANNEL_ID,
+        userId: FIXTURE_USER_ID,
+        source: 'BACKFILL' as const,
+        id: `me2e-burst-${index}`,
+        ts: fixtureTs(message.offset),
+        sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
+        text: `<@${authedUserId}> ${message.text}`,
+        mentionedUserIds: [authedUserId],
+      })),
+    ],
+  });
+}
+
+/** How many of our own rows the burst messages have state for. */
+export async function countDoneStates(messageIds: string[]): Promise<number> {
+  return prisma.messageState.count({
+    where: { messageId: { in: messageIds }, isDone: true },
+  });
+}
+
+export const BURST_MESSAGE_IDS = BURST_MESSAGES.map(
+  (_, index) => `me2e-burst-${index}`,
+);
+
+/**
  * A real (non-fixture) DM that already has a message in it, or null.
  *
  * Only the live-send reply test uses this. Every other suite asserts against
@@ -246,6 +405,88 @@ export async function findRealDirectMessage(): Promise<{
   return message
     ? { messageId: message.id, conversationId: message.conversationId }
     : null;
+}
+
+// ---------------------------------------------------------------------------
+// A DM with history, for the reading pane's conversation context
+// ---------------------------------------------------------------------------
+
+/**
+ * A one-to-one DM carrying a back-and-forth, not just inbound messages.
+ *
+ * The context transcript is only useful if it shows *both* halves — a thread of
+ * the sender's messages with the user's replies missing is a monologue, and
+ * "sounds good, go ahead" would still be unreadable. So these alternate.
+ *
+ * Alternating also keeps each inbound message its own queue row: consecutive
+ * messages from one sender collapse into a single burst.
+ *
+ * Opt-in (like the burst fixture) so the suites that count rows in the fixture
+ * channel never see it.
+ */
+export const FIXTURE_DM_ID = 'DE2ESEED001';
+
+/** Messages in the DM, oldest first. `fromMe` ones are the authed user's. */
+export const FIXTURE_DM_MESSAGES = [
+  { offset: 200, fromMe: false, text: 'E2E dm one — did the migration land?' },
+  { offset: 201, fromMe: true, text: 'E2E dm two — not yet, reviewing it now' },
+  { offset: 202, fromMe: false, text: 'E2E dm three — any blockers?' },
+  { offset: 203, fromMe: true, text: 'E2E dm four — just the index rebuild' },
+  { offset: 204, fromMe: false, text: 'E2E dm five — how long does that take?' },
+  { offset: 205, fromMe: true, text: 'E2E dm six — twenty minutes or so' },
+  { offset: 206, fromMe: false, text: 'E2E dm seven — fine, ship it after' },
+  { offset: 207, fromMe: true, text: 'E2E dm eight — will do' },
+  { offset: 208, fromMe: false, text: 'E2E dm nine — thanks' },
+  { offset: 209, fromMe: true, text: 'E2E dm ten — no problem' },
+  { offset: 210, fromMe: false, text: 'E2E dm eleven — one more thing' },
+  { offset: 211, fromMe: true, text: 'E2E dm twelve — go on' },
+  { offset: 212, fromMe: false, text: 'E2E dm thirteen — sounds good, go ahead' },
+] as const;
+
+export const FIXTURE_DM_NEWEST_TEXT =
+  FIXTURE_DM_MESSAGES[FIXTURE_DM_MESSAGES.length - 1].text;
+
+/** How many messages sit before the newest one — what context can page through. */
+export const FIXTURE_DM_HISTORY_COUNT = FIXTURE_DM_MESSAGES.length - 1;
+
+const FIXTURE_DM_MESSAGE_IDS = FIXTURE_DM_MESSAGES.map(
+  (_, index) => `me2e-dm-${index}`,
+);
+
+export async function seedDirectMessageFixture(
+  authedUserId: string,
+): Promise<void> {
+  // The authed user's own rows need a `User` to point at. Backfill will
+  // normally have created it; `update: {}` makes this a no-op when it has, so
+  // the fixture can never overwrite real directory data.
+  await prisma.user.upsert({
+    where: { id: authedUserId },
+    create: { id: authedUserId, username: 'authed-user' },
+    update: {},
+  });
+
+  await prisma.conversation.upsert({
+    where: { id: FIXTURE_DM_ID },
+    create: {
+      id: FIXTURE_DM_ID,
+      kind: 'IM',
+      peerUserId: FIXTURE_USER_ID,
+      isMember: true,
+    },
+    update: { peerUserId: FIXTURE_USER_ID },
+  });
+
+  await prisma.message.createMany({
+    data: FIXTURE_DM_MESSAGES.map((message, index) => ({
+      conversationId: FIXTURE_DM_ID,
+      source: 'BACKFILL' as const,
+      id: `me2e-dm-${index}`,
+      userId: message.fromMe ? authedUserId : FIXTURE_USER_ID,
+      ts: fixtureTs(message.offset),
+      sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
+      text: message.text,
+    })),
+  });
 }
 
 /** Clear our done flag for one message, so a live test starts from a known state. */

@@ -1,51 +1,26 @@
 import Link from 'next/link';
 
-import { loadInbox } from '@/lib/queue/load';
+import { loadInbox, resolveConversationScope } from '@/lib/queue/load';
 import { runSnoozeSweeps } from '@/lib/snooze/actions';
 import { listViews } from '@/lib/views/actions';
 import { InboxClient } from '@/app/inbox/InboxClient';
+import type { QueueScope } from '@/lib/queue/queue';
 import type { SavedView } from '@/lib/views/filters';
 
-/**
- * The unified inbox (plan.md, Phase 2).
- *
- * A server component: the database read, the Slack installation lookup, and
- * the queue construction all happen here, and only the serializable
- * `QueueItem[]` crosses to the client. No Slack token, no Prisma row, and no
- * raw Slack payload shape is in the props.
- */
-
 export const dynamic = 'force-dynamic';
-
-/**
- * Do NOT add a `loading.tsx` to this route (or to the app root).
- *
- * A route-level Suspense boundary makes `revalidatePath('/inbox')` — which every
- * server action here calls — tear down and remount `InboxClient`. That discards
- * all of its state: the sort mode, the palette scope, the selected row, and the
- * in-flight/confirmed save counters. Marking an item done would visibly reset
- * the inbox under the user.
- *
- * It was added in Phase 8 and removed the same day, after four e2e tests caught
- * it. `/stats` keeps its loading state safely, because it holds no client state
- * to lose.
- */
 
 export const metadata = {
   title: 'Inbox · SlackZero',
 };
 
-export default async function InboxPage() {
-  // Wake anything whose snooze has elapsed, or whose thread has new activity,
-  // before reading the queue. The background job (`npm run snooze:sweep`) makes
-  // items reappear while the app is already open; this makes them reappear when
-  // it is opened, which is the case that matters for a tool closed overnight.
-  // Never allowed to break the page: an unswept snooze is a late item, not a
-  // broken inbox.
+export default async function InboxPage({
+  searchParams,
+}: {
+  searchParams?: { in?: string };
+}) {
   try {
     await runSnoozeSweeps();
   } catch {
-    // Intentionally ignored — see above.
   }
 
   let data;
@@ -70,10 +45,6 @@ export default async function InboxPage() {
       </main>
     );
   }
-
-  // Saved views are a separate read on purpose: a failure here should cost the
-  // sidebar, not the whole queue. With no views the inbox still works — it just
-  // falls back to the unfiltered list.
   let views: SavedView[] = [];
   try {
     views = await listViews();
@@ -81,18 +52,25 @@ export default async function InboxPage() {
     views = [];
   }
 
-  // The clock is read once, here, and passed down — see the note in
-  // `lib/queue/time.ts` about hydration.
+  let initialScope: QueueScope | null = null;
+  if (searchParams?.in) {
+    try {
+      initialScope = await resolveConversationScope(searchParams.in);
+    } catch {
+      initialScope = null;
+    }
+  }
+
   const nowIso = new Date().toISOString();
 
   return (
     <InboxClient
       items={data.items}
-      paletteEntries={data.paletteEntries}
       workspaceName={data.workspaceName}
       isConnected={data.authedUserId !== null}
       nowIso={nowIso}
       views={views}
+      initialScope={initialScope}
     />
   );
 }

@@ -276,6 +276,17 @@ model MessageState {
   snoozedUntil DateTime?
   snoozedAt    DateTime?
 
+  /// What the most recent snooze was set for, *kept after the snooze ends*.
+  /// The sweeps clear `snoozedUntil` when an item wakes, so without this the
+  /// item would rejoin the queue looking like an ordinary unread message with
+  /// no sign it is a reminder the user set for themselves.
+  lastSnoozedUntil DateTime?
+  /// When the item rejoined the queue. Null if it never has.
+  unsnoozedAt      DateTime?
+  /// Why it came back: "time" (the snooze elapsed), "activity" (someone spoke
+  /// in the thread first), or "manual" (the user un-snoozed it).
+  unsnoozeReason   String?
+
   /// Set when the user is waiting on someone else's reply to this message.
   isWaitingOn    Boolean   @default(false)
   waitingOnSince DateTime?

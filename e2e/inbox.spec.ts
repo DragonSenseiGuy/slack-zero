@@ -14,6 +14,11 @@ import {
   FIXTURE_THREAD_REPLIES,
   FIXTURE_USER_LABEL,
 } from './fixtures/seed';
+import {
+  loadInbox,
+  loadScopedInbox,
+  pinSortToNewest,
+} from './fixtures/page';
 
 /**
  * Phase 2 verification (plan.md): load the queue, navigate with `j`/`k`, mark
@@ -51,32 +56,8 @@ test.afterAll(async () => {
   await disconnectFixtures();
 });
 
-/** Load the inbox and wait for hydration — before it, keystrokes are dropped. */
-async function loadInbox(page: Page) {
-  await page.goto('/inbox');
-  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
-    'data-hydrated',
-    'true',
-  );
-}
-
-/** Narrow the queue to the fixture channel via ⌘K. */
-async function scopeToFixtures(page: Page) {
-  await page.keyboard.press('ControlOrMeta+k');
-  await expect(page.getByTestId('command-palette')).toBeVisible();
-
-  await page.getByTestId('command-palette-input').fill(FIXTURE_CHANNEL_NAME);
-  await expect(page.getByTestId('command-palette-result')).toHaveCount(1);
-
-  await page.keyboard.press('Enter');
-  await expect(page.getByTestId('command-palette')).toBeHidden();
-  await expect(page.getByTestId('scope-chip')).toContainText(
-    FIXTURE_CHANNEL_NAME,
-  );
-}
-
 /**
- * Load, scope to the fixtures, and pin the sort to recency.
+ * Load, scope to the fixtures, and pin the sort to newest-first.
  *
  * Pinning matters: this suite is about navigation and done state, and its
  * assertions name specific rows by position. The default sort is urgency, and
@@ -86,15 +67,9 @@ async function scopeToFixtures(page: Page) {
  * unclassified rows make the urgency sort fall through to recency.)
  */
 async function openScopedInbox(page: Page) {
-  await loadInbox(page);
-  await scopeToFixtures(page);
+  await loadScopedInbox(page);
   await expect(page.getByTestId('queue-item')).toHaveCount(FIXTURE_ITEM_COUNT);
-
-  await page.keyboard.press('s');
-  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
-    'data-sort-mode',
-    'recency',
-  );
+  await pinSortToNewest(page);
 }
 
 function selectedRow(page: Page) {
@@ -227,8 +202,7 @@ test('e marks an item done, it leaves the queue, and the state survives a reload
 
   // --- the persistence check: full reload, fresh server render -------------
   await waitForSaves(page, 1);
-  await loadInbox(page);
-  await scopeToFixtures(page);
+  await loadScopedInbox(page);
 
   await expect(page.getByTestId('queue-item')).toHaveCount(
     FIXTURE_ITEM_COUNT - 1,
@@ -260,14 +234,13 @@ test('done is reversible, and the undo persists too', async ({ page }) => {
   await expect(doneRows(page)).toHaveCount(0);
   await waitForSaves(page, 2);
 
-  await loadInbox(page);
-  await scopeToFixtures(page);
+  await loadScopedInbox(page);
   await expect(page.getByTestId('inbox-error')).toHaveCount(0);
   await expect(page.getByTestId('queue-item')).toHaveCount(FIXTURE_ITEM_COUNT);
   await expect(doneRows(page)).toHaveCount(0);
 });
 
-test('Esc with nothing open clears the palette scope and widens back out', async ({
+test('Esc with nothing open clears the ?in= scope and widens back out', async ({
   page,
 }) => {
   await openScopedInbox(page);
@@ -283,23 +256,24 @@ test('Esc with nothing open clears the palette scope and widens back out', async
   );
 });
 
-test('typing in the palette does not leak into the queue shortcuts', async ({
+test('typing in the reply box does not leak into the queue shortcuts', async ({
   page,
 }) => {
+  // This used to be tested through the palette's search input. The palette is
+  // gone; the compose box is now the text field a user types into with the
+  // queue behind it, so it inherits the guarantee.
   await openScopedInbox(page);
 
-  await page.keyboard.press('ControlOrMeta+k');
-  await expect(page.getByTestId('command-palette')).toBeVisible();
+  const input = page.getByTestId('reply-input');
+  await input.click();
 
   // "jee" is next-item, mark-done, mark-done. None of it may reach the queue.
-  await page
-    .getByTestId('command-palette-input')
-    .pressSequentially('jee', { delay: 20 });
-  await expect(page.getByTestId('command-palette-input')).toHaveValue('jee');
+  await input.pressSequentially('jee', { delay: 20 });
+  await expect(input).toHaveValue('jee');
 
-  await page.keyboard.press('Escape');
-  await expect(page.getByTestId('command-palette')).toBeHidden();
-
+  // No Escape here: while typing, Escape *is* a live binding — it means "back",
+  // and from the list that widens the scope. The assertion is that the letters
+  // themselves did nothing, which is checkable without leaving the field.
   await expect(page.getByTestId('queue-item')).toHaveCount(FIXTURE_ITEM_COUNT);
   await expect(doneRows(page)).toHaveCount(0);
   await expect(selectedRow(page)).toContainText(FIXTURE_NEWEST_TEXT);

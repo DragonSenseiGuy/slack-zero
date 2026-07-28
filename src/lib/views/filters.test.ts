@@ -8,10 +8,13 @@ import {
   describeFilters,
   matchesViewFilters,
   parseViewFilters,
+  isChronologicalSort,
+  nextViewSort,
   sortForView,
   VIEW_LAYOUTS,
   VIEW_SORTS,
   type ViewFilters,
+  type ViewSort,
 } from '@/lib/views/filters';
 import type { MessageTriage, TriageCategory } from '@/lib/triage/types';
 
@@ -54,6 +57,9 @@ function item(overrides: ItemOverrides = {}): QueueItem {
     conversationId: 'D0BKMJLRRNH',
     ts: `178493859${counter}.000100`,
     sentAtIso: new Date(NOW - hoursAgo * 3_600_000).toISOString(),
+    // Distinct per item by default: these fixtures test filtering and sorting,
+    // so each one has to stay its own row unless a test says otherwise.
+    burstKey: `burst-${counter}`,
     reason: 'dm' as QueueReason,
     senderId: 'U0BEHBXNGHK',
     senderLabel: 'Dragon Sensei Guy',
@@ -67,6 +73,7 @@ function item(overrides: ItemOverrides = {}): QueueItem {
     isDone: false,
     doneAtIso: null,
     snoozedUntilIso: null,
+    snooze: null,
     isWaitingOn: false,
     waitingSinceIso: null,
     threadTs: null,
@@ -81,6 +88,7 @@ function item(overrides: ItemOverrides = {}): QueueItem {
       triageOverrides === null
         ? null
         : triage(triageOverrides ?? {}),
+    group: null,
     bumps: null,
     ...rest,
   };
@@ -383,6 +391,31 @@ describe('sortForView', () => {
     expect(
       sortForView([bump, original], 'newest', { collapseBumps: false }),
     ).toHaveLength(2);
+  });
+});
+
+describe('nextViewSort', () => {
+  it('reaches every order and returns to where it started', () => {
+    // The header control is the only way to change the order now, so a sort it
+    // cannot step to is a sort the user cannot choose.
+    const seen: string[] = [];
+    let sort: ViewSort = VIEW_SORTS[0];
+    for (let step = 0; step < VIEW_SORTS.length; step += 1) {
+      seen.push(sort);
+      sort = nextViewSort(sort);
+    }
+    expect(new Set(seen)).toEqual(new Set(VIEW_SORTS));
+    expect(sort).toBe(VIEW_SORTS[0]);
+  });
+});
+
+describe('isChronologicalSort', () => {
+  it('is true only for the time orders, where day headers make sense', () => {
+    expect(isChronologicalSort('newest')).toBe(true);
+    expect(isChronologicalSort('oldest')).toBe(true);
+    // In urgency order these would read "Today / Older / Today".
+    expect(isChronologicalSort('urgency')).toBe(false);
+    expect(isChronologicalSort('vip_unread_first')).toBe(false);
   });
 });
 

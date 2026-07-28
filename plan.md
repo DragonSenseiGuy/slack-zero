@@ -916,6 +916,181 @@ down to the connected workspace holding 8 trivial messages.
 
 ---
 
+## Post-Phase-8 fixes
+
+### One person, one row: same-sender bursts are a single task (2026-07-26)
+**Status:** Done — unit and e2e verification pass.
+
+**Reported:** every DM was its own item in the queue, even several in a row
+from the same person.
+
+**Cause:** the queue model was one row per message from Phase 2, and the only
+thing that ever merged rows was Phase 3's bump collapsing — which needs the
+model to have flagged a message `is_bump` *and* linked it to the message it
+chases. An ordinary run of DMs ("hey" / "you around?" / "need a review") is not
+a bump chain, so nothing merged it.
+
+**Fixed by** deciding grouping from the transcript instead of from the model.
+`assignBurstKeys` (in `src/lib/queue/queue.ts`) walks each conversation, and
+each thread within it, in time order and marks consecutive messages from one
+sender as one *burst*. `collapseBursts` folds each burst into a single row.
+It costs no LLM calls, which is the point — this is per-message, high-volume
+work and CLAUDE.md rules a model out of it.
+
+- A run ends when anyone else speaks, **including the user**: once you have
+  replied, what comes next is a new task.
+- A run never ends on elapsed time. Two messages from one person with nothing
+  in between are one row however far apart they are; the row reports how long
+  it has been going. A time cap would put a week-old unanswered ask and today's
+  follow-up back on separate rows, which is the reported bug again.
+- A thread parent always stands alone, because it already shows its replies
+  inline.
+- The row shows the **newest** message — deliberately the opposite of a bump
+  chain, which keeps the original. A burst is a live conversation and its last
+  line is the one being answered; the alternative buries "the DB is down" under
+  a three-day-old "hey". Staleness is carried by the badge instead.
+- The row is rated by its **most actionable** message, so "ok cool" arriving
+  after a real ask cannot demote it out of Needs Reply.
+- Every action — done, snooze, reply-then-done — applies to all of the row's
+  messages. Writing only the newest would put the rest straight back in the
+  queue on the next load.
+
+**Verification:**
+- `npm run test` → 599 tests / 24 files (was 577), including 22 new ones over
+  `assignBurstKeys`, `collapseBursts` and the interaction with bump chains.
+- `npm run test:e2e` → 44 passed / 1 skipped, including a new `e2e/bursts.spec.ts`
+  covering the three things unit tests cannot: one row in the DOM, every folded
+  message still readable in the pane, and done writing state for all of them so
+  the row does not return after a reload.
+- Against the real workspace, the queue went from 8 rows to 2: seven DMs from
+  one person became one item.
+
+**Fixture note:** `e2e/fixtures/seed.ts` now interleaves a second sender
+between the six fixture messages. They were six consecutive messages from one
+sender, which is now — correctly — a single row, and every count assertion in
+the inbox, views, reply and snooze suites depended on six.
+
+---
+
+### A live inbox, one sort control, no jump-to (2026-07-26)
+**Status:** Done — unit and e2e verification pass.
+
+Five reported issues, fixed together because three of them were the same
+mistake: the header describing a state the list was not in.
+
+**1. "Sort by urgency sorts lowest to highest."** The comparator was correct and
+unit tested; the header was the liar. There were *two* sort systems — a
+two-mode toggle in the header (urgency/recency) and a `sort` field on each saved
+view — and the header's was ignored whenever the active view specified `oldest`
+or `vip_unread_first`. Opening "Waiting on Others" therefore showed an
+oldest-first list under a header reading "Sort: Urgency", with the lowest
+urgencies at the top. There is now one control: `s` cycles every order a view
+can specify, seeded from the active view, and the header always names the order
+on screen (`nextViewSort` in `src/lib/views/filters.ts`).
+
+**2. Jump-to removed.** `⌘K` scoped the queue to a channel or person, which is
+what saved views already do, and it cost a chord that shadows the browser's.
+`src/lib/palette/` and `CommandPalette.tsx` are gone. Scoping survives as
+`/inbox?in=<channel-or-id>`, which is how the e2e suite isolates its fixtures
+(`e2e/fixtures/page.ts`) — that was the palette's only load-bearing use.
+
+**3. Shortcut footer removed.** The `?` overlay renders the same
+`SHORTCUT_HELP` list; a permanent twelve-item bar spent a strip of every screen
+restating it.
+
+**4. A sent reply now appears in the reading pane.** Sending showed a "Sent"
+notice and nothing else. A DM reply is not a thread reply, so it never came back
+as one of `item.threadReplies` and left no trace in the transcript. Replies sent
+this session are echoed under a "You sent" heading, keyed by Slack's `ts` so an
+echo arriving through ingestion cannot double up.
+
+**5. The inbox updates itself.** It was a snapshot taken at page load: a DM
+arriving over Socket Mode, or a snooze elapsing, needed a manual reload.
+`/api/inbox/stream` is an SSE endpoint that runs the snooze sweeps and watches a
+cheap revision fingerprint (`src/lib/queue/revision.ts`); the client answers a
+change with `router.refresh()`, so the queue is still built once by the server
+component and no client state is lost. Push, not poll-in-the-browser, because
+the sweep has to run somewhere anyway — and it is fingerprint-shaped rather than
+event-shaped because the Socket Mode listener is a separate process, making the
+database the only channel between it and the web server.
+
+**Found while testing #5:** snoozing added the row's ids to a client-side set
+that was never cleared, so a snooze that elapsed and woke on the server stayed
+hidden. A reload used to clear the set, which is why it never showed; it became
+visible the moment the queue started updating in place. The set is now a bridge
+that clears as soon as the fetched queue reflects the snooze.
+
+**Verification:**
+- `npm run test` → 582 tests / 24 files.
+- `npm run test:e2e` → 47 passed / 1 skipped (the opt-in live send), including a
+  new `e2e/live.spec.ts`: a message written after page load appears without a
+  navigation, and an elapsed snooze returns on its own.
+- Against the real workspace: opened `/inbox`, inserted a DM straight into
+  Postgres, watched it appear; deleted it, watched it go.
+
+---
+
+### Context in the reading pane, visible reminders, "mark as complete" (2026-07-27)
+**Status:** Done — unit and e2e verification pass.
+
+Four requests from using the app for real.
+
+**1. "Done" is now "mark as complete".** Copy only — `isDone`, `doneAt`,
+`setMessagesDone` and every test id are untouched, so no stored state or
+selector moved. The action reads "Mark as complete" in the reading pane and
+"Mark complete" on a queue row (the list pane is 448px wide and the full phrase
+crowded the preview out); the *state* reads "Completed", which the header count,
+the `u` toggle, the view builder and the stats page now match.
+
+**2. DMs show the conversation, not one message.** A queue row is a single
+message lifted out of a DM, which is enough to rank it and nowhere near enough
+to answer it — "sounds good, go ahead" needs the question above it. The reading
+pane now loads the ten preceding messages and fetches ten more each time the
+user scrolls to the top of the transcript (or presses the button, which is what
+the e2e suite drives — scroll-triggered paging is real but not something to
+assert on in a headless browser).
+
+Paging is by `ts` cursor, not offset: backfill inserts history *underneath* a
+reading position routinely, and an offset would then skip or repeat messages.
+`hasMore` comes from over-fetching one row rather than a second `COUNT`. It is
+a route (`/api/conversations/[id]/context`) rather than a server action because
+the client drives the paging state, and it reads only from Postgres — scrolling
+back through a year of a conversation costs no Slack rate limit.
+
+**3. Mentions show context too.** Same component, same route: a mention is the
+same problem in a channel. Threads deliberately do *not* get one — they already
+print their replies inline, and a second transcript would compete with it. A
+collapsed burst starts its page from the *oldest* message in the run, so the
+messages the pane already prints are not printed twice.
+
+**4. A woken reminder says it was snoozed.** The sweeps clear `snoozedUntil` to
+bring an item back, which meant the reminder you set for yourself rejoined the
+queue indistinguishable from a message that had just arrived — the single
+biggest reason snooze felt untrustworthy. `MessageState` now also keeps
+`lastSnoozedUntil`, `unsnoozedAt` and `unsnoozeReason` (`time` / `activity` /
+`manual`), so both sweeps and a manual un-snooze leave a record. The queue row
+and the reading pane carry a badge: "Snoozed · back in 3 hours" while it is
+hidden, "Snoozed · came back 2 hours ago" or "· woken early by new activity"
+once it is back. The badge sits in the row's meta line rather than with the
+triage badges so it survives the dense layout.
+
+Both sweeps became raw SQL, because waking an item has to *copy* `snoozedUntil`
+into `lastSnoozedUntil` and Prisma's update API cannot express a column-to-column
+copy.
+
+**Verification:**
+- `npm run test` → 609 tests / 25 files, including new suites for the context
+  page arithmetic (`src/lib/queue/context.test.ts`), the snooze provenance
+  mapping (`toQueueSnooze`) and its wording (`snoozeStatusLabel`).
+- `npm run test:e2e` → 50 passed / 1 skipped (the opt-in live send), including a
+  new `e2e/context.spec.ts`: a mention shows ten earlier messages and pages back
+  to eleven, the transcript follows the selection, and a DM shows *both* halves
+  of the conversation (a new opt-in DM fixture with the authed user's own
+  replies in it). `e2e/live.spec.ts` now also asserts that an elapsed snooze
+  comes back wearing its badge.
+
+---
+
 ## Done Criteria for the Overall Project
 All 8 phases marked `Done`, full test suite green, and a working app that can
 OAuth into a real Slack workspace, ingest DMs/mentions, classify and sort

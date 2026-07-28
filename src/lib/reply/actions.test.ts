@@ -31,6 +31,10 @@ vi.mock('@/lib/db', () => ({
     messageState: {
       upsert: (...args: unknown[]) => messageStateUpsert(...args),
     },
+    // The done write covers every message behind the row, so it goes through a
+    // transaction. Real Prisma takes the array of prepared operations; here they
+    // have already run as promises, so awaiting them all is a faithful stand-in.
+    $transaction: (operations: unknown[]) => Promise.all(operations),
   },
 }));
 

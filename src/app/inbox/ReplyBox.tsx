@@ -10,19 +10,6 @@ import {
   type ReplyDraft,
 } from '@/lib/reply/draft';
 
-/**
- * The inline reply box (plan.md, Phase 5).
- *
- * Lives in the reading pane so replying never costs the queue position. The
- * parent owns sending — this component owns the text, the drafts, and the
- * keyboard affordances around them.
- *
- * One deliberate restraint: a draft containing a `[placeholder]` cannot be sent
- * with one key. The prompt asks the model to leave those rather than invent a
- * date or a number, so offering one-key send on `"does [time] work?"` would make
- * it trivial to fire that at a colleague verbatim.
- */
-
 export type ReplyBoxProps = {
   item: QueueItem;
   drafts: ReplyDraft[];
@@ -30,7 +17,6 @@ export type ReplyBoxProps = {
   draftsError: string | null;
   sending: boolean;
   error: string | null;
-  /** Slack ts of the last reply sent from this box, for the sent confirmation. */
   sentTs: string | null;
   markDone: boolean;
   onMarkDoneChange: (markDone: boolean) => void;
@@ -56,8 +42,6 @@ export function ReplyBox({
   const [text, setText] = useState('');
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Clear the box when the selection changes — carrying a half-typed reply to a
-  // different person is a way to send it to the wrong one.
   useEffect(() => {
     setText('');
   }, [item.id]);
@@ -138,7 +122,6 @@ export function ReplyBox({
         data-testid="reply-input"
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
-          // Enter sends, Shift+Enter makes a newline — Slack's own convention.
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault();
             submit();
@@ -202,7 +185,7 @@ export function ReplyBox({
             data-testid="reply-mark-done"
             onChange={(event) => onMarkDoneChange(event.target.checked)}
           />
-          Mark done after sending
+          Mark as complete after sending
         </label>
 
         <span className="ml-auto text-[11px] text-neutral-400">

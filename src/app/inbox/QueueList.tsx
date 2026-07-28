@@ -4,16 +4,13 @@ import { Fragment, useEffect, useRef } from 'react';
 
 import type { QueueItem, QueueReason } from '@/lib/queue/queue';
 import { formatDayBucket, formatRelativeTime } from '@/lib/queue/time';
-import { BumpBadge, TriageBadges } from '@/app/inbox/TriageBadges';
+import {
+  BumpBadge,
+  GroupBadge,
+  SnoozeBadge,
+  TriageBadges,
+} from '@/app/inbox/TriageBadges';
 import type { ViewLayout } from '@/lib/views/filters';
-
-/**
- * The queue list. One row per message: sender, preview, channel/DM context,
- * timestamp (plan.md, Phase 2).
- *
- * Rows are buttons, not links: clicking selects and opens in the pane without
- * a navigation, which is what keeps the queue position stable.
- */
 
 const REASON_LABEL: Record<QueueReason, string> = {
   dm: 'DM',
@@ -31,17 +28,7 @@ export type QueueListProps = {
   items: QueueItem[];
   selectedIndex: number;
   nowIso: string;
-  /**
-   * Day headers only make sense while the list is in time order. In urgency
-   * order they would read as "Today / Older / Today", which is worse than no
-   * headers at all.
-   */
   showDayBuckets?: boolean;
-  /**
-   * "dense" drops the preview, the badges and the context line, leaving one
-   * line per message (plan.md, Phase 4). It is a per-view choice: a triage view
-   * wants the detail, a "Waiting Room" skim does not.
-   */
   layout?: ViewLayout;
   onSelect: (index: number) => void;
   onOpen: (index: number) => void;
@@ -60,9 +47,6 @@ export function QueueList({
 }: QueueListProps) {
   const selectedRef = useRef<HTMLLIElement | null>(null);
 
-  // Keep the cursor on screen while paging with j/k. `nearest` scrolls the
-  // minimum amount, so a long run of `j` reads as a moving highlight rather
-  // than the list jumping under the user.
   useEffect(() => {
     selectedRef.current?.scrollIntoView({ block: 'nearest' });
   }, [selectedIndex]);
@@ -76,7 +60,7 @@ export function QueueList({
         <div>
           <p className="text-lg font-medium text-neutral-700">Inbox zero</p>
           <p className="mt-1 text-sm text-neutral-500">
-            Nothing left to triage. Press <Kbd>u</Kbd> to see done items.
+            Nothing left to triage. Press <Kbd>u</Kbd> to see completed items.
           </p>
         </div>
       </div>
@@ -114,6 +98,7 @@ export function QueueList({
             ref={isSelected ? selectedRef : null}
             data-testid="queue-item"
             data-message-id={item.id}
+            data-message-count={item.group?.messageCount ?? 1}
             data-selected={isSelected ? 'true' : 'false'}
             data-done={item.isDone ? 'true' : 'false'}
             aria-current={isSelected ? 'true' : undefined}
@@ -171,16 +156,25 @@ export function QueueList({
                 {isDense ? null : (
                   <div className="mt-1 flex flex-wrap items-center gap-1.5">
                     <TriageBadges item={item} />
+                    <GroupBadge item={item} nowIso={nowIso} />
                     <BumpBadge item={item} nowIso={nowIso} />
                   </div>
                 )}
 
                 <div
-                  className={`flex items-center gap-2 text-[11px] text-neutral-500 ${
+                  className={`flex flex-wrap items-center gap-2 text-[11px] text-neutral-500 ${
                     isDense ? '' : 'mt-1'
                   }`}
                 >
+                  {/* In the meta row rather than with the triage badges, so a
+                      reminder still announces itself in the dense layout. */}
+                  <SnoozeBadge item={item} nowIso={nowIso} />
                   <span className="truncate">{item.contextLabel}</span>
+                  {isDense && item.group ? (
+                    <span className="shrink-0">
+                      · {item.group.messageCount} messages
+                    </span>
+                  ) : null}
                   {item.replyCount > 0 ? (
                     <span className="shrink-0">· {item.replyCount} replies</span>
                   ) : null}
@@ -193,7 +187,7 @@ export function QueueList({
                       className="shrink-0 font-medium text-emerald-700"
                       data-testid="queue-item-done-badge"
                     >
-                      · Done
+                      · Completed
                     </span>
                   ) : null}
                 </div>
@@ -202,9 +196,11 @@ export function QueueList({
               <button
                 type="button"
                 aria-label={
-                  item.isDone
-                    ? `Mark ${item.senderLabel}'s message not done`
-                    : `Mark ${item.senderLabel}'s message done`
+                  `Mark ${
+                    item.group
+                      ? `${item.group.messageCount} messages from ${item.senderLabel}`
+                      : `${item.senderLabel}'s message`
+                  } ${item.isDone ? 'incomplete' : 'as complete'}`
                 }
                 aria-pressed={item.isDone}
                 data-testid="queue-item-done-toggle"
@@ -215,7 +211,7 @@ export function QueueList({
                 }`}
                 onClick={() => onToggleDone(item)}
               >
-                {item.isDone ? 'Undo' : 'Done'}
+                {item.isDone ? 'Undo' : 'Mark complete'}
               </button>
             </div>
             </li>

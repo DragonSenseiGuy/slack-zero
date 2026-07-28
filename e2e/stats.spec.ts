@@ -5,8 +5,8 @@ import {
   disconnectFixtures,
   getAuthedUserId,
   seedInboxFixtures,
-  FIXTURE_CHANNEL_NAME,
 } from './fixtures/seed';
+import { loadScopedInbox } from './fixtures/page';
 
 /**
  * plan.md, Phase 7 verification: "Playwright check that dashboard renders with
@@ -121,16 +121,7 @@ test('numbers move when an item is actually triaged', async ({ page }) => {
   );
 
   // Triage one item.
-  await page.goto('/inbox');
-  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
-    'data-hydrated',
-    'true',
-  );
-  await page.keyboard.press('ControlOrMeta+k');
-  await page.getByTestId('command-palette-input').fill(FIXTURE_CHANNEL_NAME);
-  await expect(page.getByTestId('command-palette-result')).toHaveCount(1);
-  await page.keyboard.press('Enter');
-  await expect(page.getByTestId('scope-chip')).toBeVisible();
+  await loadScopedInbox(page);
 
   await page.keyboard.press('e');
   // Wait for the server to confirm, not the optimistic update.

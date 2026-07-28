@@ -7,9 +7,9 @@ import {
   findRealDirectMessage,
   getAuthedUserId,
   seedInboxFixtures,
-  FIXTURE_CHANNEL_NAME,
   FIXTURE_ITEM_COUNT,
 } from './fixtures/seed';
+import { loadInbox, loadScopedInbox } from './fixtures/page';
 
 /**
  * Phase 5 verification (plan.md): reply to a test DM from the queue, confirm the
@@ -48,25 +48,6 @@ test.afterAll(async () => {
   await disconnectFixtures();
 });
 
-async function loadInbox(page: Page) {
-  await page.goto('/inbox');
-  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
-    'data-hydrated',
-    'true',
-  );
-}
-
-async function scopeToFixtures(page: Page) {
-  await page.keyboard.press('ControlOrMeta+k');
-  await expect(page.getByTestId('command-palette')).toBeVisible();
-  await page.getByTestId('command-palette-input').fill(FIXTURE_CHANNEL_NAME);
-  await expect(page.getByTestId('command-palette-result')).toHaveCount(1);
-  await page.keyboard.press('Enter');
-  await expect(page.getByTestId('scope-chip')).toContainText(
-    FIXTURE_CHANNEL_NAME,
-  );
-}
-
 // ---------------------------------------------------------------------------
 // UI, no sending
 // ---------------------------------------------------------------------------
@@ -83,8 +64,7 @@ test.describe('the compose box', () => {
   test('appears for the selected message with the sender named', async ({
     page,
   }) => {
-    await loadInbox(page);
-    await scopeToFixtures(page);
+    await loadScopedInbox(page);
     await expect(page.getByTestId('queue-item')).toHaveCount(
       FIXTURE_ITEM_COUNT,
     );
@@ -98,8 +78,7 @@ test.describe('the compose box', () => {
   });
 
   test('refuses to send an empty or whitespace-only reply', async ({ page }) => {
-    await loadInbox(page);
-    await scopeToFixtures(page);
+    await loadScopedInbox(page);
 
     // Nothing typed: the button is disabled rather than posting an empty message.
     await expect(page.getByTestId('reply-send')).toBeDisabled();
@@ -115,8 +94,7 @@ test.describe('the compose box', () => {
     page,
   }) => {
     // plan.md: "After reply sent, auto-mark item done (configurable)".
-    await loadInbox(page);
-    await scopeToFixtures(page);
+    await loadScopedInbox(page);
 
     const toggle = page.getByTestId('reply-mark-done');
     await expect(toggle).toBeChecked();
@@ -129,8 +107,7 @@ test.describe('the compose box', () => {
   }) => {
     // "read" contains `r`, `e` and `d` — all bound. `e` marking the message done
     // mid-sentence would be the worst of them.
-    await loadInbox(page);
-    await scopeToFixtures(page);
+    await loadScopedInbox(page);
     await expect(page.getByTestId('queue-item')).toHaveCount(
       FIXTURE_ITEM_COUNT,
     );
@@ -148,8 +125,7 @@ test.describe('the compose box', () => {
   });
 
   test('r focuses the compose box from the list', async ({ page }) => {
-    await loadInbox(page);
-    await scopeToFixtures(page);
+    await loadScopedInbox(page);
 
     await page.keyboard.press('r');
     await expect(page.getByTestId('reply-input')).toBeFocused();
@@ -158,8 +134,7 @@ test.describe('the compose box', () => {
   test('the compose box clears when the selection changes', async ({ page }) => {
     // Carrying a half-typed reply to a different person is how you send it to
     // the wrong one.
-    await loadInbox(page);
-    await scopeToFixtures(page);
+    await loadScopedInbox(page);
 
     await page.getByTestId('reply-input').fill('half-written thought');
     await page.getByTestId('reply-input').blur();
@@ -232,6 +207,11 @@ test.describe('sending for real', () => {
     );
     await expect(page.getByTestId('reply-error')).toHaveCount(0);
     await expect(page.getByTestId('reply-sent')).toBeVisible();
+
+    // The reply is in the transcript, not just in a notice. A DM reply is not a
+    // thread reply, so nothing else in the pane would ever show it.
+    await expect(page.getByTestId('reading-pane-sent')).toBeVisible();
+    await expect(page.getByTestId('sent-reply')).toContainText(body);
 
     // ---- confirm it is really in Slack ----
     const { WebClient } = await import('@slack/web-api');

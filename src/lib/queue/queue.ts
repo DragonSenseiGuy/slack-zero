@@ -6,26 +6,6 @@ import {
 } from '@/lib/queue/text';
 import { categoryRank, type MessageTriage } from '@/lib/triage/types';
 
-/**
- * The queue model: which stored messages belong in the unified inbox, in what
- * order, and what each row says.
- *
- * Everything here is pure — it takes plain row objects and lookup maps, never
- * a Prisma client, a network call, or the clock. `load.ts` does the IO and
- * hands the results in. That split is what lets the inclusion rules and the
- * sort be unit tested against fixtures with no live Slack and no database
- * (CLAUDE.md, "Unit test pure logic ... with fixture data").
- *
- * Phase 3 adds the smart half: each item carries its `triage` result, and
- * `sortQueue` implements the two modes plan.md asks for — sort-by-urgency, and
- * sort-by-recency-with-bumps-collapsed. Both are still pure. Saved views and
- * filters remain Phase 4.
- */
-
-// ---------------------------------------------------------------------------
-// Input shapes (our internal model — no Slack payload types here)
-// ---------------------------------------------------------------------------
-
 export type QueueConversationKind =
   | 'IM'
   | 'MPIM'
@@ -93,6 +73,12 @@ export type QueueMessageRow = {
   /** Phase 6. Null when never snoozed. */
   snoozedUntil?: Date | null;
   snoozedAt?: Date | null;
+  /** What the last snooze was set for, kept after the snooze ends. */
+  lastSnoozedUntil?: Date | null;
+  /** When the item rejoined the queue, if it ever was snoozed. */
+  unsnoozedAt?: Date | null;
+  /** "time" | "activity" | "manual" — why it came back. */
+  unsnoozeReason?: string | null;
   isWaitingOn?: boolean;
   waitingOnSince?: Date | null;
 
@@ -134,12 +120,68 @@ export type QueueBumpSummary = {
   peakUrgencyScore: number | null;
 };
 
+/** One message folded into a burst row, for the reading pane's transcript. */
+export type QueueGroupMessage = {
+  id: string;
+  ts: string;
+  sentAtIso: string;
+  body: string;
+  isDone: boolean;
+};
+
+/**
+ * What a collapsed burst says about itself.
+ *
+ * Present only on a row that stands for more than one message. A person firing
+ * off "hey" / "quick q" / "wdyt?" is one thing to deal with, not three, so the
+ * row reports the run as a whole: how many messages, when it started, and the
+ * highest urgency anywhere in it.
+ */
+export type QueueGroupSummary = {
+  /** Messages this row stands for, including the representative. */
+  messageCount: number;
+  /** Every folded message id, oldest first, representative included. */
+  messageIds: string[];
+  /** ISO timestamp of the first message in the run. */
+  firstMessageAtIso: string;
+  /** ISO timestamp of the last — which is the row's own `sentAtIso`. */
+  latestMessageAtIso: string;
+  /** Highest urgency anywhere in the run, null if none were classified. */
+  peakUrgencyScore: number | null;
+  /** The earlier messages, oldest first, excluding the representative. */
+  earlier: QueueGroupMessage[];
+};
+
+/** Why a snoozed item is back in the queue. */
+export type QueueUnsnoozeReason = 'time' | 'activity' | 'manual';
+
+/**
+ * A snooze, seen from the queue: either still running, or finished and the
+ * reason it finished.
+ */
+export type QueueSnooze = {
+  /** `pending` while hidden; `returned` once it is back in the queue. */
+  state: 'pending' | 'returned';
+  /** What the snooze was set for. */
+  untilIso: string;
+  /** When it rejoined the queue. Null while `state` is `pending`. */
+  returnedAtIso: string | null;
+  /** Null while `state` is `pending`, or if the reason was not recorded. */
+  returnedReason: QueueUnsnoozeReason | null;
+};
+
 export type QueueItem = {
   id: string;
   conversationId: string;
   ts: string;
   /** ISO-8601. A `Date` cannot be handed to a client component as-is. */
   sentAtIso: string;
+
+  /**
+   * Which uninterrupted run of messages from one sender this belongs to. Rows
+   * sharing a key are one task; see `assignBurstKeys`.
+   */
+  burstKey: string;
 
   reason: QueueReason;
 
@@ -164,6 +206,14 @@ export type QueueItem = {
 
   /** Phase 6: set while the item is hidden by a snooze. */
   snoozedUntilIso: string | null;
+  /**
+   * The snooze this row is living under, or came back from.
+   *
+   * Separate from `snoozedUntilIso`, which the sweeps clear the moment an item
+   * wakes: without this the reminder you set for yourself would rejoin the
+   * queue indistinguishable from a message that just arrived.
+   */
+  snooze: QueueSnooze | null;
   /** Phase 6: the user asked something here and is awaiting a reply. */
   isWaitingOn: boolean;
   waitingSinceIso: string | null;
@@ -182,6 +232,10 @@ export type QueueItem = {
 
   /** AI triage result. Null until the async classifier has seen it. */
   triage: MessageTriage | null;
+
+  /** Set by `collapseBursts` on a row that absorbed the sender's other
+   * consecutive messages. Null on a row that stands for exactly one message. */
+  group: QueueGroupSummary | null;
 
   /** Set by `collapseBumpChains` on a row that absorbed follow-ups. */
   bumps: QueueBumpSummary | null;
@@ -272,6 +326,110 @@ export function queueReasonFor(
 }
 
 // ---------------------------------------------------------------------------
+// Bursts: one person's uninterrupted run of messages is one task
+// ---------------------------------------------------------------------------
+
+/**
+ * The conversation "stream" a message sits in for burst purposes.
+ *
+ * Root-level messages and each thread are separate streams, because a thread
+ * reply and a top-level DM are different places to answer even when they come
+ * from the same person seconds apart.
+ */
+function burstStreamKey(row: {
+  conversationId: string;
+  threadTs: string | null;
+}): string {
+  return `${row.conversationId} ${row.threadTs ?? 'root'}`;
+}
+
+/** Who sent it, for run-boundary purposes. Bots without a user id count too. */
+function senderKeyFor(row: QueueMessageRow): string {
+  return row.userId ?? row.botId ?? 'unknown';
+}
+
+function compareRowsOldestFirst(a: QueueMessageRow, b: QueueMessageRow): number {
+  const timeA = a.sentAt.getTime();
+  const timeB = b.sentAt.getTime();
+  if (timeA !== timeB) return timeA - timeB;
+  if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Group each stream into runs: consecutive messages from the same sender that
+ * nobody else interrupted.
+ *
+ * This is the deterministic half of "one person, one row". A DM burst is not a
+ * classification problem — "the same person messaged three times and I have not
+ * answered yet" is a fact about the transcript — so it is decided here, from the
+ * stored rows, and never sent to the model. `collapseBumpChains` stays for the
+ * cases only the model can see: a chase that arrives *after* you replied, or in
+ * a different conversation entirely.
+ *
+ * Two things end a run:
+ *  - anyone else speaking, **including the user** — once you have replied, what
+ *    comes next is a new task, not more of the old one;
+ *  - a thread parent, which always stands alone: it already shows its replies
+ *    inline in the reading pane, so folding a reply into it would render the
+ *    same message twice.
+ *
+ * Deliberately *not* a boundary: elapsed time. A run only ever breaks on
+ * someone speaking, so two messages from one person with nothing in between are
+ * one row no matter how far apart they are — a week-old unanswered ask and
+ * today's follow-up are the same outstanding thing, and the row says how long it
+ * has been waiting. Any time cap would put those back on separate rows, which is
+ * exactly the symptom this function exists to remove.
+ *
+ * Takes *every* row, not just queue-worthy ones: the user's own messages never
+ * appear in the queue but are the most important boundary there is. Deleted
+ * messages and membership noise are skipped entirely — they neither join a run
+ * nor split one, because "Bob joined the channel" between two of Bob's messages
+ * is not a change of subject.
+ *
+ * Returns message id → burst key. Ids absent from the map (skipped rows) have
+ * no burst.
+ */
+export function assignBurstKeys(
+  rows: readonly QueueMessageRow[],
+): Map<string, string> {
+  const keys = new Map<string, string>();
+  const runs = new Map<string, { senderKey: string; key: string }>();
+  let counter = 0;
+
+  for (const row of [...rows].sort(compareRowsOldestFirst)) {
+    if (row.isDeleted) continue;
+    if (row.subtype !== null && HIDDEN_SUBTYPES.has(row.subtype)) continue;
+
+    const stream = burstStreamKey(row);
+
+    if (row.isThreadParent) {
+      counter += 1;
+      keys.set(row.id, `${stream}#${counter}`);
+      // Reset, so the first reply starts its own run rather than continuing the
+      // parent's even when the same person wrote both.
+      runs.delete(stream);
+      continue;
+    }
+
+    const senderKey = senderKeyFor(row);
+    const open = runs.get(stream);
+
+    if (!open || open.senderKey !== senderKey) {
+      counter += 1;
+      const started = { senderKey, key: `${stream}#${counter}` };
+      runs.set(stream, started);
+      keys.set(row.id, started.key);
+      continue;
+    }
+
+    keys.set(row.id, open.key);
+  }
+
+  return keys;
+}
+
+// ---------------------------------------------------------------------------
 // Labels
 // ---------------------------------------------------------------------------
 
@@ -281,8 +439,14 @@ export function userLabel(user: QueueUser | undefined | null): string | null {
   return user.displayName || user.realName || user.username || user.id;
 }
 
+/** Just enough of a stored row to name its author. */
+export type SenderFields = Pick<
+  QueueMessageRow,
+  'userId' | 'authorName' | 'botId'
+>;
+
 export function senderLabelFor(
-  row: QueueMessageRow,
+  row: SenderFields,
   users: ReadonlyMap<string, QueueUser>,
 ): string {
   const fromDirectory = row.userId ? userLabel(users.get(row.userId)) : null;
@@ -323,7 +487,7 @@ export function contextLabelFor(
 // Building
 // ---------------------------------------------------------------------------
 
-function lookupFrom(
+export function lookupFrom(
   users: ReadonlyMap<string, QueueUser>,
   conversations: ReadonlyMap<string, QueueConversation>,
 ): LabelLookup {
@@ -350,11 +514,60 @@ function emptyBodyFallback(row: QueueMessageRow): string {
   return '(no text)';
 }
 
+const UNSNOOZE_REASONS: ReadonlySet<string> = new Set([
+  'time',
+  'activity',
+  'manual',
+]);
+
+/**
+ * Collapse the four stored snooze columns into the one thing the UI asks:
+ * "is this a reminder, and where is it in its life?".
+ *
+ * A pending snooze wins over a recorded return, because re-snoozing is how a
+ * user pushes a woken reminder further out and the row must then read as
+ * hidden-again rather than as back.
+ */
+export function toQueueSnooze(row: {
+  snoozedUntil?: Date | null;
+  lastSnoozedUntil?: Date | null;
+  unsnoozedAt?: Date | null;
+  unsnoozeReason?: string | null;
+}): QueueSnooze | null {
+  if (row.snoozedUntil) {
+    return {
+      state: 'pending',
+      untilIso: row.snoozedUntil.toISOString(),
+      returnedAtIso: null,
+      returnedReason: null,
+    };
+  }
+
+  // `unsnoozedAt` is the one that must be present: it is what makes the row a
+  // returned snooze rather than a message that was never snoozed at all.
+  if (!row.unsnoozedAt) return null;
+
+  const reason = row.unsnoozeReason ?? '';
+
+  return {
+    state: 'returned',
+    untilIso: (row.lastSnoozedUntil ?? row.unsnoozedAt).toISOString(),
+    returnedAtIso: row.unsnoozedAt.toISOString(),
+    returnedReason: UNSNOOZE_REASONS.has(reason)
+      ? (reason as QueueUnsnoozeReason)
+      : null,
+  };
+}
+
 export function toQueueItem(
   row: QueueMessageRow,
   reason: QueueReason,
   users: ReadonlyMap<string, QueueUser>,
   conversations: ReadonlyMap<string, QueueConversation>,
+  /** From `assignBurstKeys`. Defaults to a key of its own — a row that groups
+   * with nothing, which is the right answer when the caller has no wider view
+   * of the conversation than this single message. */
+  burstKey: string = `${row.conversationId} solo#${row.id}`,
 ): QueueItem {
   const lookup = lookupFrom(users, conversations);
   const rendered = renderSlackText(row.text, lookup);
@@ -367,6 +580,8 @@ export function toQueueItem(
     conversationId: row.conversationId,
     ts: row.ts,
     sentAtIso: row.sentAt.toISOString(),
+
+    burstKey,
 
     reason,
 
@@ -388,6 +603,7 @@ export function toQueueItem(
     isDone: row.isDone,
     doneAtIso: row.doneAt ? row.doneAt.toISOString() : null,
     snoozedUntilIso: row.snoozedUntil ? row.snoozedUntil.toISOString() : null,
+    snooze: toQueueSnooze(row),
     isWaitingOn: row.isWaitingOn ?? false,
     waitingSinceIso: row.waitingOnSince ? row.waitingOnSince.toISOString() : null,
 
@@ -403,6 +619,7 @@ export function toQueueItem(
     threadReplies: [],
 
     triage: row.triage,
+    group: null,
     bumps: null,
   };
 }
@@ -439,11 +656,17 @@ export function buildQueue(
   const conversations =
     options.conversations ?? new Map<string, QueueConversation>();
 
+  // Computed over *all* rows before anything is filtered out: the user's own
+  // replies are what end a run, and they never survive `queueReasonFor`.
+  const burstKeys = assignBurstKeys(rows);
+
   const items: QueueItem[] = [];
   for (const row of rows) {
     const reason = queueReasonFor(row, options);
     if (reason === null) continue;
-    items.push(toQueueItem(row, reason, users, conversations));
+    items.push(
+      toQueueItem(row, reason, users, conversations, burstKeys.get(row.id)),
+    );
   }
 
   return items.sort(compareByRecency);
@@ -586,11 +809,33 @@ export function nextSortMode(mode: QueueSortMode): QueueSortMode {
  * async and deliberately never blocks ingestion.
  */
 export function effectiveUrgency(item: QueueItem): number | null {
-  const own = item.triage?.urgencyScore ?? null;
-  const peak = item.bumps?.peakUrgencyScore ?? null;
-  if (own === null) return peak;
-  if (peak === null) return own;
-  return Math.max(own, peak);
+  const scores = [
+    item.triage?.urgencyScore ?? null,
+    item.group?.peakUrgencyScore ?? null,
+    item.bumps?.peakUrgencyScore ?? null,
+  ].filter((score): score is number => score !== null);
+
+  return scores.length === 0 ? null : Math.max(...scores);
+}
+
+/**
+ * Every stored message a row stands for.
+ *
+ * A collapsed row is one *task* but several rows in the database, and every
+ * action has to apply to all of them. Marking a three-message burst done and
+ * writing only the newest would put the other two straight back in the queue on
+ * the next load — the item would visibly refuse to leave.
+ */
+export function itemMessageIds(item: QueueItem): string[] {
+  const ids = new Set<string>([item.id]);
+  for (const id of item.group?.messageIds ?? []) ids.add(id);
+  for (const id of item.bumps?.bumpMessageIds ?? []) ids.add(id);
+  return [...ids];
+}
+
+/** When the oldest message a row stands for arrived. */
+export function firstAskedIso(item: QueueItem): string {
+  return item.group?.firstMessageAtIso ?? item.sentAtIso;
 }
 
 /** Unclassified items rank after every category, never between them. */
@@ -620,6 +865,143 @@ export function compareByUrgency(a: QueueItem, b: QueueItem): number {
   if (rankA !== rankB) return rankA - rankB;
 
   return compareByRecency(a, b);
+}
+
+/**
+ * Which member's triage speaks for a whole burst: the most actionable one.
+ *
+ * Not the newest. "ok cool" arriving after "the deploy is broken, can you look?"
+ * would otherwise rate the row `misc` and drop it out of the Needs Reply view —
+ * the burst is still an outstanding ask, and it is the ask that has to be
+ * visible. Ties break on the higher urgency score.
+ */
+function leadingTriage(members: readonly QueueItem[]): MessageTriage | null {
+  let best: MessageTriage | null = null;
+
+  for (const member of members) {
+    const triage = member.triage;
+    if (!triage) continue;
+    if (best === null) {
+      best = triage;
+      continue;
+    }
+    const rank = categoryRank(triage.category) - categoryRank(best.category);
+    if (rank < 0 || (rank === 0 && triage.urgencyScore > best.urgencyScore)) {
+      best = triage;
+    }
+  }
+
+  return best;
+}
+
+/** The later of two ISO timestamps, tolerating nulls. */
+function laterIso(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a > b ? a : b;
+}
+
+function earlierIso(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a < b ? a : b;
+}
+
+/**
+ * Fold each burst — one sender's uninterrupted run in one conversation — into a
+ * single row.
+ *
+ * The survivor is the **newest** message, which is the opposite of
+ * `collapseBumpChains` and deliberately so. A bump chain is one question asked
+ * repeatedly, so it keeps the original's timestamp to expose staleness. A burst
+ * is a running conversation whose latest line is the one you are answering, so
+ * the row shows and sorts by the latest message and reports how long the run has
+ * been going in `group.firstMessageAtIso` instead. What the burst must not do is
+ * bury the newest message behind an older preview — that is how an "the prod DB
+ * is down" lands under a three-day-old "hey".
+ *
+ * Rows the run does not agree on are merged rather than taken from the
+ * representative: the row is done only when every message in it is done, it
+ * carries files if any message did, and it is rated by its most actionable
+ * message (see `leadingTriage`).
+ */
+export function collapseBursts(items: readonly QueueItem[]): QueueItem[] {
+  const groups = new Map<string, QueueItem[]>();
+  const order: string[] = [];
+
+  for (const item of items) {
+    const bucket = groups.get(item.burstKey);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      groups.set(item.burstKey, [item]);
+      order.push(item.burstKey);
+    }
+  }
+
+  const collapsed: QueueItem[] = [];
+
+  for (const key of order) {
+    const members = (groups.get(key) as QueueItem[]).slice().sort(olderFirst);
+
+    if (members.length === 1) {
+      collapsed.push({ ...members[0], group: null });
+      continue;
+    }
+
+    const representative = members[members.length - 1];
+    const earlier = members.slice(0, -1);
+
+    let peakUrgencyScore: number | null = null;
+    let allDone = true;
+    let doneAtIso: string | null = null;
+    let hasFiles = false;
+    let isWaitingOn = false;
+    let waitingSinceIso: string | null = null;
+
+    for (const member of members) {
+      const score = member.triage?.urgencyScore ?? null;
+      if (score !== null) {
+        peakUrgencyScore =
+          peakUrgencyScore === null ? score : Math.max(peakUrgencyScore, score);
+      }
+      if (member.isDone) doneAtIso = laterIso(doneAtIso, member.doneAtIso);
+      else allDone = false;
+      if (member.hasFiles) hasFiles = true;
+      if (member.isWaitingOn) {
+        isWaitingOn = true;
+        waitingSinceIso = earlierIso(waitingSinceIso, member.waitingSinceIso);
+      }
+    }
+
+    collapsed.push({
+      ...representative,
+      // A part-done run is still open work: the unanswered messages in it have
+      // not gone anywhere, and hiding the row would hide them with it.
+      isDone: allDone,
+      doneAtIso: allDone ? doneAtIso : null,
+      hasFiles,
+      isWaitingOn,
+      waitingSinceIso,
+      triage: leadingTriage(members) ?? representative.triage,
+      group: {
+        messageCount: members.length,
+        messageIds: members.map((member) => member.id),
+        firstMessageAtIso: members[0].sentAtIso,
+        latestMessageAtIso: representative.sentAtIso,
+        peakUrgencyScore,
+        earlier: earlier.map((member) => ({
+          id: member.id,
+          ts: member.ts,
+          sentAtIso: member.sentAtIso,
+          body: member.body,
+          isDone: member.isDone,
+        })),
+      },
+    });
+  }
+
+  return collapsed;
 }
 
 /** Guard against a `bumpOf` cycle the model could produce. */
@@ -668,11 +1050,22 @@ function olderFirst(a: QueueItem, b: QueueItem): number {
  * than the whole chain vanishing.
  */
 export function collapseBumpChains(items: readonly QueueItem[]): QueueItem[] {
+  // A bump's target may already have been folded into a burst, in which case the
+  // id the model gave us is no longer a row. Resolve through the row that now
+  // stands for it, or the link would dangle and the chain would not collapse.
+  const ownerOf = new Map<string, string>();
+  for (const item of items) {
+    for (const id of itemMessageIds(item)) ownerOf.set(id, item.id);
+  }
+
   const links = new Map<string, string>();
   for (const item of items) {
     const triage = item.triage;
     if (triage?.isBump && triage.bumpOfMessageId) {
-      links.set(item.id, triage.bumpOfMessageId);
+      const target = ownerOf.get(triage.bumpOfMessageId) ?? triage.bumpOfMessageId;
+      // The chase and what it chases are already the same row — a burst got
+      // there first. Nothing left to link.
+      if (target !== item.id) links.set(item.id, target);
     }
   }
 
@@ -716,10 +1109,11 @@ export function collapseBumpChains(items: readonly QueueItem[]): QueueItem[] {
       (member) => member.id !== representative.id,
     );
 
-    let peakUrgencyScore: number | null =
-      representative.triage?.urgencyScore ?? null;
+    // `effectiveUrgency`, not the raw score: a follower may itself be a
+    // collapsed burst whose peak sits on a message other than its newest.
+    let peakUrgencyScore: number | null = effectiveUrgency(representative);
     for (const follower of followers) {
-      const score = follower.triage?.urgencyScore ?? null;
+      const score = effectiveUrgency(follower);
       if (score === null) continue;
       peakUrgencyScore =
         peakUrgencyScore === null ? score : Math.max(peakUrgencyScore, score);
@@ -729,9 +1123,11 @@ export function collapseBumpChains(items: readonly QueueItem[]): QueueItem[] {
       ...representative,
       bumps: {
         bumpCount: followers.length,
-        firstAskedAtIso: representative.sentAtIso,
+        firstAskedAtIso: firstAskedIso(representative),
         lastBumpedAtIso: followers[followers.length - 1].sentAtIso,
-        bumpMessageIds: followers.map((follower) => follower.id),
+        // Flattened, so a burst folded into a chain still hands every one of its
+        // message ids to whatever acts on the row.
+        bumpMessageIds: followers.flatMap(itemMessageIds),
         peakUrgencyScore,
       },
     });
@@ -749,17 +1145,30 @@ export type SortQueueOptions = {
    * not in how many rows a conversation is worth.
    */
   collapseBumps?: boolean;
+  /** Same reasoning, for same-sender bursts. Off only for tests and debugging. */
+  groupBursts?: boolean;
 };
 
-/** The queue, in the order the user asked for. */
+/**
+ * The queue, in the order the user asked for.
+ *
+ * Burst grouping runs first and bump collapsing second, because the burst pass
+ * is the one that can be decided from the transcript alone. Anything it folds is
+ * a chain the model never has to be right about; what reaches
+ * `collapseBumpChains` is the residue — chases separated by your own reply, or
+ * sitting in another conversation.
+ */
 export function sortQueue(
   items: readonly QueueItem[],
   options: SortQueueOptions,
 ): QueueItem[] {
-  const rows =
-    options.collapseBumps === false
+  const grouped =
+    options.groupBursts === false
       ? items.map((item) => ({ ...item }))
-      : collapseBumpChains(items);
+      : collapseBursts(items);
+
+  const rows =
+    options.collapseBumps === false ? grouped : collapseBumpChains(grouped);
 
   return rows.sort(
     options.mode === 'urgency' ? compareByUrgency : compareByRecency,

@@ -19,7 +19,7 @@ import {
  */
 
 export type SnoozeResult =
-  | { ok: true; messageId: string; snoozedUntilIso: string }
+  | { ok: true; messageIds: string[]; snoozedUntilIso: string }
   | { ok: false; error: string };
 
 export type UnsnoozeResult =
@@ -38,7 +38,22 @@ export async function snoozeMessage(
   messageId: string,
   input: { preset: SnoozePreset; customIso?: string },
 ): Promise<SnoozeResult> {
-  if (!messageId) return { ok: false, error: 'A message id is required.' };
+  return snoozeMessages([messageId], input);
+}
+
+/**
+ * Snooze every message behind one queue row.
+ *
+ * Same reasoning as `setMessagesDone`: a collapsed burst is one task. Snoozing
+ * only its newest message would leave the rest of the run in the inbox, so the
+ * row would appear to shed a message rather than disappear.
+ */
+export async function snoozeMessages(
+  messageIds: readonly string[],
+  input: { preset: SnoozePreset; customIso?: string },
+): Promise<SnoozeResult> {
+  const ids = [...new Set(messageIds.filter((id) => id !== ''))];
+  if (ids.length === 0) return { ok: false, error: 'A message id is required.' };
 
   const now = new Date();
 
@@ -65,28 +80,45 @@ export async function snoozeMessage(
     throw error;
   }
 
+  // Const so the null check above survives into the closures below.
+  const snoozedUntil = until;
+
   try {
-    await prisma.messageState.upsert({
-      where: { messageId },
-      create: {
-        messageId,
-        snoozedUntil: until,
-        snoozedAt: now,
-        // Snoozing something already done would be contradictory; snoozing is a
-        // way of saying "not now", which implies not done.
-        isDone: false,
-        doneAt: null,
-      },
-      update: {
-        snoozedUntil: until,
-        snoozedAt: now,
-        isDone: false,
-        doneAt: null,
-      },
-    });
+    await prisma.$transaction(
+      ids.map((messageId) =>
+        prisma.messageState.upsert({
+          where: { messageId },
+          create: {
+            messageId,
+            snoozedUntil,
+            snoozedAt: now,
+            // Snoozing something already done would be contradictory; snoozing is
+            // a way of saying "not now", which implies not done.
+            isDone: false,
+            doneAt: null,
+          },
+          update: {
+            snoozedUntil,
+            snoozedAt: now,
+            isDone: false,
+            doneAt: null,
+            // A fresh snooze supersedes whatever the last one did: the item is
+            // pending again, so it must not also claim to have come back.
+            lastSnoozedUntil: null,
+            unsnoozedAt: null,
+            unsnoozeReason: null,
+          },
+          select: { messageId: true },
+        }),
+      ),
+    );
 
     revalidatePath('/inbox');
-    return { ok: true, messageId, snoozedUntilIso: until.toISOString() };
+    return {
+      ok: true,
+      messageIds: ids,
+      snoozedUntilIso: snoozedUntil.toISOString(),
+    };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return { ok: false, error: `Could not snooze: ${detail}` };
@@ -100,10 +132,27 @@ export async function unsnoozeMessage(
   if (!messageId) return { ok: false, error: 'A message id is required.' };
 
   try {
+    const existing = await prisma.messageState.findUnique({
+      where: { messageId },
+      select: { snoozedUntil: true },
+    });
+
     await prisma.messageState.upsert({
       where: { messageId },
       create: { messageId },
-      update: { snoozedUntil: null, snoozedAt: null },
+      update: {
+        snoozedUntil: null,
+        snoozedAt: null,
+        // Only record provenance if there was actually a snooze to end —
+        // un-snoozing something that was never snoozed must not invent one.
+        ...(existing?.snoozedUntil
+          ? {
+              lastSnoozedUntil: existing.snoozedUntil,
+              unsnoozedAt: new Date(),
+              unsnoozeReason: 'manual',
+            }
+          : {}),
+      },
     });
 
     revalidatePath('/inbox');
@@ -128,13 +177,23 @@ export async function unsnoozeMessage(
 export async function sweepDueSnoozes(): Promise<number> {
   const now = new Date();
 
-  const result = await prisma.messageState.updateMany({
-    where: { snoozedUntil: { not: null, lte: now } },
-    data: { snoozedUntil: null, snoozedAt: null },
-  });
+  // Raw SQL rather than `updateMany`, because waking an item has to *copy*
+  // `snoozedUntil` into `lastSnoozedUntil` — the row must keep saying what it
+  // was snoozed for after it comes back, and a column-to-column copy is not
+  // expressible in Prisma's update API.
+  const count = await prisma.$executeRaw`
+    UPDATE "MessageState"
+    SET "lastSnoozedUntil" = "snoozedUntil",
+        "unsnoozedAt" = ${now},
+        "unsnoozeReason" = 'time',
+        "snoozedUntil" = NULL,
+        "snoozedAt" = NULL
+    WHERE "snoozedUntil" IS NOT NULL
+      AND "snoozedUntil" <= ${now}
+  `;
 
-  if (result.count > 0) revalidatePath('/inbox');
-  return result.count;
+  if (count > 0) revalidatePath('/inbox');
+  return count;
 }
 
 /**
@@ -148,7 +207,11 @@ export async function sweepDueSnoozes(): Promise<number> {
 export async function sweepActivityWakeups(): Promise<number> {
   const woken = await prisma.$executeRaw`
     UPDATE "MessageState" ms
-    SET "snoozedUntil" = NULL, "snoozedAt" = NULL
+    SET "lastSnoozedUntil" = ms."snoozedUntil",
+        "unsnoozedAt" = NOW(),
+        "unsnoozeReason" = 'activity',
+        "snoozedUntil" = NULL,
+        "snoozedAt" = NULL
     FROM "Message" m
     WHERE ms."messageId" = m.id
       AND ms."snoozedUntil" IS NOT NULL

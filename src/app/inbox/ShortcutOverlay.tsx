@@ -3,14 +3,6 @@
 import { Kbd } from '@/app/inbox/QueueList';
 import { SHORTCUT_HELP } from '@/lib/keyboard/shortcuts';
 
-/**
- * The `?` cheat sheet (plan.md, Phase 8).
- *
- * Reads from `SHORTCUT_HELP`, the same list the footer uses and the same module
- * that resolves keys — so a binding cannot be added without appearing here, and
- * the overlay cannot drift into documenting a key that no longer works.
- */
-
 export type ShortcutOverlayProps = {
   onClose: () => void;
 };
@@ -61,7 +53,7 @@ export function ShortcutOverlay({ onClose }: ShortcutOverlayProps) {
 
         <p className="mt-4 border-t border-neutral-200 pt-3 text-[11px] text-neutral-500">
           Shortcuts stand down while you are typing, so a reply containing
-          &ldquo;read&rdquo; will not mark anything done. Press{' '}
+          &ldquo;read&rdquo; will not mark anything complete. Press{' '}
           <Kbd>Esc</Kbd> to close.
         </p>
       </div>

@@ -98,16 +98,17 @@ test('typing ? in the compose box does not open the cheat sheet', async ({
 test('an empty queue says so rather than rendering a blank pane', async ({
   page,
 }) => {
-  // With no fixtures seeded and the queue scoped to nothing that exists, the
-  // list should explain itself. A blank column reads as a broken app.
+  // With no fixtures seeded and the queue scoped to a channel that does not
+  // exist, the list should explain itself. A blank column reads as a broken app.
   await clearInboxFixtures();
-  await loadInbox(page);
-
-  await page.keyboard.press('ControlOrMeta+k');
-  await page.getByTestId('command-palette-input').fill('nothing-matches-this');
-  await expect(page.getByTestId('command-palette-result')).toHaveCount(0);
-  await page.keyboard.press('Escape');
-  await page.keyboard.press('Escape');
+  await page.goto('/inbox?in=nothing-matches-this');
+  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
+    'data-hydrated',
+    'true',
+  );
+  // An unresolvable `?in=` widens rather than emptying — showing nothing for a
+  // typo would look like data loss.
+  await expect(page.getByTestId('scope-chip')).toHaveCount(0);
 
   // The reading pane's empty state is always reachable and always explains.
   const emptyish = page.getByTestId('queue-empty').or(page.getByTestId('queue-list'));

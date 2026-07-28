@@ -1,34 +1,35 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { CommandPalette } from '@/app/inbox/CommandPalette';
 import { ReplyBox } from '@/app/inbox/ReplyBox';
 import { ShortcutOverlay } from '@/app/inbox/ShortcutOverlay';
 import { SnoozeMenu } from '@/app/inbox/SnoozeMenu';
 import { ViewBuilder } from '@/app/inbox/ViewBuilder';
 import { ViewSidebar } from '@/app/inbox/ViewSidebar';
 import { Kbd, QueueList } from '@/app/inbox/QueueList';
-import { ReadingPane } from '@/app/inbox/ReadingPane';
+import { ReadingPane, type SentReply } from '@/app/inbox/ReadingPane';
 import {
   isTypingTarget,
   resolveShortcut,
-  SHORTCUT_HELP,
   type InboxMode,
 } from '@/lib/keyboard/shortcuts';
-import type { PaletteEntry } from '@/lib/palette/search';
-import { filterPaletteEntries } from '@/lib/palette/search';
-import { setMessageDone } from '@/lib/queue/actions';
+import { setMessagesDone } from '@/lib/queue/actions';
+import { useInboxLive } from '@/lib/queue/useInboxLive';
 import { draftReplies, sendReplyToMessage } from '@/lib/reply/actions';
-import { snoozeMessage } from '@/lib/snooze/actions';
+import { snoozeMessages } from '@/lib/snooze/actions';
 import type { SnoozePreset } from '@/lib/snooze/schedule';
 import type { ReplyDraft } from '@/lib/reply/draft';
 import { createView, deleteView, updateView } from '@/lib/views/actions';
 import {
   applyViewFilters,
   DEFAULT_VIEW_NAME,
+  isChronologicalSort,
+  nextViewSort,
   sortForView,
+  SORT_LABEL,
   type SavedView,
   type ViewFilters,
   type ViewLayout,
@@ -36,69 +37,43 @@ import {
 } from '@/lib/views/filters';
 import {
   clampIndex,
+  collapseBursts,
+  itemMessageIds,
   moveSelection,
-  nextSortMode,
   queueCounts,
-  sortQueue,
   unclassifiedCount,
-  SORT_MODE_LABEL,
   type QueueItem,
   type QueueScope,
-  type QueueSortMode,
 } from '@/lib/queue/queue';
 
-/**
- * The inbox shell: split view, keyboard dispatch, optimistic done state,
- * command palette.
- *
- * Only presentation and interaction live here. Which messages qualify, how
- * they sort, what a key means, and how the palette ranks are all pure
- * functions in `lib/` with their own unit tests — this component is the part
- * that is only meaningfully testable through Playwright, so it is kept thin
- * on purpose.
- */
+// The inbox shell
 
 export type InboxClientProps = {
   items: QueueItem[];
-  paletteEntries: PaletteEntry[];
   workspaceName: string | null;
   isConnected: boolean;
   nowIso: string;
-  /** Saved views for the sidebar (plan.md, Phase 4). Empty is a valid state. */
   views: SavedView[];
+  initialScope?: QueueScope | null;
 };
 
-/** Local, unconfirmed done state layered over the server's. */
 type DoneOverride = { isDone: boolean; doneAtIso: string | null };
 
 export function InboxClient({
   items,
-  paletteEntries,
   workspaceName,
   isConnected,
   nowIso,
   views: initialViews,
+  initialScope = null,
 }: InboxClientProps) {
+  const router = useRouter();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [mode, setMode] = useState<InboxMode>('list');
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [paletteQuery, setPaletteQuery] = useState('');
-  const [paletteIndex, setPaletteIndex] = useState(0);
   const [showDone, setShowDone] = useState(false);
-  /**
-   * Urgency is the default because prioritization is the product (plan.md,
-   * Phase 3). `s` switches to recency, where a collapsed bump chain sorts at
-   * the time of the *original* ask — which is the whole point of collapsing:
-   * a chase surfaces staleness instead of looking like new activity.
-   */
-  const [sortMode, setSortMode] = useState<QueueSortMode>('urgency');
-  const [scope, setScope] = useState<QueueScope | null>(null);
+  const [sortOverride, setSortOverride] = useState<ViewSort | null>(null);
+  const [scope, setScope] = useState<QueueScope | null>(initialScope);
 
-  /**
-   * Saved views (plan.md, Phase 4). Held in client state and seeded from the
-   * server so switching views is a re-filter of data already in memory — no
-   * fetch and no navigation, which is what "without full page reload" requires.
-   */
   const [views, setViews] = useState<SavedView[]>(initialViews);
   const [activeViewId, setActiveViewId] = useState<string | null>(() => {
     const preferred =
@@ -111,36 +86,29 @@ export function InboxClient({
   const [builderBusy, setBuilderBusy] = useState(false);
   const [builderError, setBuilderError] = useState<string | null>(null);
   const [overrides, setOverrides] = useState<Record<string, DoneOverride>>({});
+  /** Read-only mirror, so rollback can see the current overrides without
+   * making every keystroke handler depend on them. */
+  const overridesRef = useRef(overrides);
+  useEffect(() => {
+    overridesRef.current = overrides;
+  }, [overrides]);
   const [error, setError] = useState<string | null>(null);
-  /**
-   * Saves still in flight, and saves the server has confirmed. The optimistic
-   * update means the UI is already showing the new state, so without this
-   * there is nothing — for the user or for a test — that distinguishes "shown"
-   * from "stored". Navigating away mid-flight would silently drop the write.
-   */
   const [pendingSaves, setPendingSaves] = useState(0);
   const [confirmedSaves, setConfirmedSaves] = useState(0);
 
-  /**
-   * Reply state (plan.md, Phase 5).
-   *
-   * `sentTs` and `replyError` are keyed by nothing — they are about the *current*
-   * selection, and are cleared when it changes, because a success or failure
-   * notice that outlived its message would be attached to the wrong person.
-   */
   const [replySending, setReplySending] = useState(false);
   const [replyError, setReplyError] = useState<string | null>(null);
   const [replySentTs, setReplySentTs] = useState<string | null>(null);
   const [replySentCount, setReplySentCount] = useState(0);
-  /** Auto-mark done after sending. plan.md: configurable, on by default. */
+  const [sentReplies, setSentReplies] = useState<Record<string, SentReply[]>>({});
   const [replyMarkDone, setReplyMarkDone] = useState(true);
-  /** Snooze picker (Phase 6). */
   const [helpOpen, setHelpOpen] = useState(false);
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [snoozeBusy, setSnoozeBusy] = useState(false);
   const [snoozeError, setSnoozeError] = useState<string | null>(null);
-  /** Ids hidden locally by a snooze the server has already accepted. */
-  const [snoozedIds, setSnoozedIds] = useState<Set<string>>(new Set());
+  const [pendingSnoozeIds, setPendingSnoozeIds] = useState<Set<string>>(
+    new Set(),
+  );
 
   const [drafts, setDrafts] = useState<ReplyDraft[]>([]);
   const [draftsLoading, setDraftsLoading] = useState(false);
@@ -149,42 +117,42 @@ export function InboxClient({
   const paneRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  // Hydration marker. Until this flips, the page is server-rendered HTML with
-  // no key listener attached, so a keystroke is silently dropped. The e2e
-  // suite waits on it instead of racing hydration; a user gets the same
-  // guarantee that the shortcut footer only claims to work once it does.
   const [isHydrated, setIsHydrated] = useState(false);
   useEffect(() => setIsHydrated(true), []);
 
-  // Server truth, with any in-flight local toggle applied on top.
   const effectiveItems = useMemo(
     () =>
       items
-        // A snooze the server has accepted but this render has not re-fetched.
-        // Dropping the row here rather than filtering later keeps the sidebar
-        // counts honest too.
-        .filter((item) => !snoozedIds.has(item.id))
+        .filter((item) => !pendingSnoozeIds.has(item.id))
         .map((item) => {
           const override = overrides[item.id];
           return override
             ? { ...item, isDone: override.isDone, doneAtIso: override.doneAtIso }
             : item;
         }),
-    [items, overrides, snoozedIds],
+    [items, overrides, pendingSnoozeIds],
   );
+
+  useEffect(() => {
+    setPendingSnoozeIds((current) => {
+      if (current.size === 0) return current;
+
+      const byId = new Map(items.map((item) => [item.id, item]));
+      const next = new Set(current);
+      for (const id of current) {
+        const item = byId.get(id);
+        if (!item || item.snoozedUntilIso !== null) next.delete(id);
+      }
+
+      return next.size === current.size ? current : next;
+    });
+  }, [items]);
 
   const activeView = useMemo(
     () => views.find((view) => view.id === activeViewId) ?? null,
     [views, activeViewId],
   );
 
-  /**
-   * The view's own filters, with the two live toggles layered on top.
-   *
-   * `u` (show done) and the palette scope are transient UI state, not part of
-   * the saved view — so they override rather than mutate it. A view that saved
-   * `includeDone: true` still honours that; `u` can only widen.
-   */
   const effectiveFilters = useMemo<ViewFilters>(
     () => ({
       ...(activeView?.filters ?? {}),
@@ -194,32 +162,27 @@ export function InboxClient({
     [activeView, showDone, scope],
   );
 
+  const sort: ViewSort = sortOverride ?? activeView?.sort ?? 'urgency';
+
   const visibleItems = useMemo(() => {
-    // Filter first, then collapse and sort. Collapsing after filtering is what
-    // lets a chain whose original ask is already done still show up under its
-    // oldest surviving follow-up rather than disappearing.
-    const filtered = applyViewFilters(effectiveItems, effectiveFilters);
+    return sortForView(
+      applyViewFilters(effectiveItems, effectiveFilters),
+      sort,
+    );
+  }, [effectiveItems, effectiveFilters, sort]);
 
-    // The header's sort toggle stays authoritative while it is showing, so `s`
-    // keeps working inside a saved view; the view's own sort is the starting
-    // point for views that specify one of the Phase 4 orders.
-    if (activeView && (activeView.sort === 'oldest' || activeView.sort === 'vip_unread_first')) {
-      return sortForView(filtered, activeView.sort);
-    }
-    return sortQueue(filtered, { mode: sortMode });
-  }, [effectiveItems, effectiveFilters, activeView, sortMode]);
-
-  /** Open-item count per view, for the sidebar badges. */
   const viewCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const view of views) {
-      counts[view.id] = applyViewFilters(effectiveItems, view.filters).length;
+      counts[view.id] = collapseBursts(
+        applyViewFilters(effectiveItems, view.filters),
+      ).length;
     }
     return counts;
   }, [views, effectiveItems]);
 
   const counts = useMemo(
-    () => queueCounts(effectiveItems, scope),
+    () => queueCounts(collapseBursts(effectiveItems), scope),
     [effectiveItems, scope],
   );
 
@@ -231,56 +194,51 @@ export function InboxClient({
   const safeIndex = clampIndex(selectedIndex, visibleItems.length);
   const selectedItem = visibleItems[safeIndex] ?? null;
 
-  const paletteResults = useMemo(
-    () => filterPaletteEntries(paletteEntries, paletteQuery),
-    [paletteEntries, paletteQuery],
-  );
-
-  // -------------------------------------------------------------------------
-  // Actions
-  // -------------------------------------------------------------------------
+  const liveStatus = useInboxLive(useCallback(() => router.refresh(), [router]));
 
   const toggleDone = useCallback(
     (item: QueueItem) => {
       const next = !item.isDone;
-      const previous = { isDone: item.isDone, doneAtIso: item.doneAtIso };
+      const ids = itemMessageIds(item);
+      const previous = Object.fromEntries(
+        ids.map((id) => [
+          id,
+          overridesRef.current[id] ?? {
+            isDone: item.isDone,
+            doneAtIso: item.doneAtIso,
+          },
+        ]),
+      );
 
-      // Optimistic: the whole point of the phase is that `e` feels instant.
-      setOverrides((current) => ({
-        ...current,
-        [item.id]: {
-          isDone: next,
-          doneAtIso: next ? new Date().toISOString() : null,
-        },
-      }));
+      const applyAll = (state: DoneOverride) =>
+        setOverrides((current) => ({
+          ...current,
+          ...Object.fromEntries(ids.map((id) => [id, state])),
+        }));
+
+      applyAll({
+        isDone: next,
+        doneAtIso: next ? new Date().toISOString() : null,
+      });
       setError(null);
       setPendingSaves((count) => count + 1);
 
-      void setMessageDone(item.id, next)
+      void setMessagesDone(ids, next)
         .then((result) => {
           if (result.ok) {
-            setOverrides((current) => ({
-              ...current,
-              [item.id]: {
-                isDone: result.isDone,
-                doneAtIso: result.doneAtIso,
-              },
-            }));
+            applyAll({ isDone: result.isDone, doneAtIso: result.doneAtIso });
             setConfirmedSaves((count) => count + 1);
             return;
           }
-          // Roll back rather than leave the UI claiming something is saved
-          // when it is not — a triage tool that silently loses "done" is worse
-          // than one that refuses.
-          setOverrides((current) => ({ ...current, [item.id]: previous }));
+          setOverrides((current) => ({ ...current, ...previous }));
           setError(result.error);
         })
         .catch((cause: unknown) => {
-          setOverrides((current) => ({ ...current, [item.id]: previous }));
+          setOverrides((current) => ({ ...current, ...previous }));
           setError(
             cause instanceof Error
-              ? `Could not save done state: ${cause.message}`
-              : 'Could not save done state.',
+              ? `Could not save the completion state: ${cause.message}`
+              : 'Could not save the completion state.',
           );
         })
         .finally(() => setPendingSaves((count) => Math.max(count - 1, 0)));
@@ -292,6 +250,7 @@ export function InboxClient({
     setActiveViewId(view.id);
     setSelectedIndex(0);
     setMode('list');
+    setSortOverride(null);
   }, []);
 
   const saveView = useCallback(
@@ -312,8 +271,6 @@ export function InboxClient({
       void run
         .then((result) => {
           if (!result.ok) {
-            // Keep the dialog open with the reason — a duplicate name is the
-            // common case and retyping the whole view would be punishing.
             setBuilderError(result.error);
             return;
           }
@@ -354,9 +311,6 @@ export function InboxClient({
           }
           setViews((current) => {
             const next = current.filter((each) => each.id !== view.id);
-            // Never leave the inbox with no view selected — fall back to the
-            // default rather than rendering an unfiltered list with no sidebar
-            // selection, which reads as a broken state.
             setActiveViewId((currentId) => {
               if (currentId !== view.id) return currentId;
               const fallback =
@@ -378,19 +332,6 @@ export function InboxClient({
     [],
   );
 
-  /**
-   * Send a reply, then optionally mark the item done.
-   *
-   * Deliberately *not* optimistic about the send itself. Everywhere else in this
-   * app an optimistic update is right, because the worst case is a local flag
-   * that rolls back. Here the worst case is the user believing a colleague got a
-   * message that never left the building — so the button says "Sending…" and the
-   * item stays put until Slack confirms.
-   *
-   * The done flag, once the send succeeds, *is* applied locally straight away:
-   * the server has already written it, and re-fetching just to see it would make
-   * a successful reply feel slow.
-   */
   const sendReply = useCallback(
     (text: string) => {
       const target = selectedItem;
@@ -400,12 +341,14 @@ export function InboxClient({
       setReplyError(null);
       setReplySentTs(null);
 
-      void sendReplyToMessage(target.id, text, { markDone: replyMarkDone })
+      const ids = itemMessageIds(target);
+
+      void sendReplyToMessage(target.id, text, {
+        markDone: replyMarkDone,
+        alsoMarkDone: ids.filter((id) => id !== target.id),
+      })
         .then((result) => {
           if (!result.ok) {
-            // No rollback needed: nothing was changed optimistically. The item
-            // stays in the queue, which is the correct place for a message that
-            // still has not been answered.
             setReplyError(result.error);
             return;
           }
@@ -415,19 +358,29 @@ export function InboxClient({
           setDrafts([]);
           setDraftsError(null);
 
+          setSentReplies((current) => {
+            const existing = current[target.id] ?? [];
+            if (existing.some((sent) => sent.ts === result.ts)) return current;
+            return {
+              ...current,
+              [target.id]: [
+                ...existing,
+                { ts: result.ts, body: text, sentAtIso: new Date().toISOString() },
+              ],
+            };
+          });
+
           if (result.markedDone) {
+            const doneAtIso = new Date().toISOString();
             setOverrides((current) => ({
               ...current,
-              [target.id]: {
-                isDone: true,
-                doneAtIso: new Date().toISOString(),
-              },
+              ...Object.fromEntries(
+                ids.map((id) => [id, { isDone: true, doneAtIso }]),
+              ),
             }));
           } else if (replyMarkDone) {
-            // Sent, but the done write did not land. Say so rather than leaving
-            // the user to wonder why the item is still there.
             setReplyError(
-              'Reply sent, but the item could not be marked done. It is still in the queue.',
+              'Reply sent, but the item could not be marked as complete. It is still in the queue.',
             );
           }
         })
@@ -453,8 +406,6 @@ export function InboxClient({
     void draftReplies(target.id)
       .then((result) => {
         if (!result.ok) {
-          // Drafts are a convenience, never a prerequisite for replying — a
-          // failure here must not disturb the compose box.
           setDraftsError(result.error);
           setDrafts([]);
           return;
@@ -477,16 +428,19 @@ export function InboxClient({
       setSnoozeBusy(true);
       setSnoozeError(null);
 
-      void snoozeMessage(target.id, { preset, customIso })
+      const ids = itemMessageIds(target);
+
+      void snoozeMessages(ids, { preset, customIso })
         .then((result) => {
           if (!result.ok) {
-            // Keep the picker open with the reason — "pick a time in the
-            // future" is actionable, and closing would lose the chosen time.
             setSnoozeError(result.error);
             return;
           }
-          // Hide it locally straight away; the server has already stored it.
-          setSnoozedIds((current) => new Set(current).add(target.id));
+          setPendingSnoozeIds((current) => {
+            const next = new Set(current);
+            for (const id of ids) next.add(id);
+            return next;
+          });
           setSnoozeOpen(false);
         })
         .catch((cause: unknown) => {
@@ -502,33 +456,8 @@ export function InboxClient({
   const openSelected = useCallback(() => {
     if (!selectedItem) return;
     setMode('reading');
-    // Focus the pane so PgUp/PgDn/space scroll the message, not the page.
     window.requestAnimationFrame(() => paneRef.current?.focus());
   }, [selectedItem]);
-
-  const closePalette = useCallback(() => {
-    setPaletteOpen(false);
-    setPaletteQuery('');
-    setPaletteIndex(0);
-  }, []);
-
-  const pickPaletteEntry = useCallback(
-    (entry: PaletteEntry) => {
-      const [kind, ...rest] = entry.id.split(':');
-      const id = rest.join(':');
-
-      if (kind === 'conversation') {
-        setScope({ kind: 'conversation', id, label: entry.label });
-      } else if (kind === 'person') {
-        setScope({ kind: 'user', id, label: entry.label });
-      }
-
-      setSelectedIndex(0);
-      setMode('list');
-      closePalette();
-    },
-    [closePalette],
-  );
 
   const goBack = useCallback(() => {
     if (mode === 'reading') {
@@ -536,21 +465,16 @@ export function InboxClient({
       listRef.current?.focus();
       return;
     }
-    // Nothing to leave: Esc then means "widen back out to everything".
     if (scope) {
       setScope(null);
       setSelectedIndex(0);
     }
   }, [mode, scope]);
 
-  // -------------------------------------------------------------------------
-  // Keyboard
-  // -------------------------------------------------------------------------
-
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const action = resolveShortcut(event, {
-        mode: paletteOpen ? 'palette' : mode,
+        mode,
         isTyping: isTypingTarget(event.target),
       });
 
@@ -559,15 +483,9 @@ export function InboxClient({
 
       switch (action.type) {
         case 'move':
-          if (paletteOpen) {
-            setPaletteIndex((current) =>
-              moveSelection(current, action.delta, paletteResults.length),
-            );
-          } else {
-            setSelectedIndex((current) =>
-              moveSelection(current, action.delta, visibleItems.length),
-            );
-          }
+          setSelectedIndex((current) =>
+            moveSelection(current, action.delta, visibleItems.length),
+          );
           break;
 
         case 'moveTo':
@@ -589,8 +507,6 @@ export function InboxClient({
             setHelpOpen(false);
             break;
           }
-          // The snooze picker is the innermost layer, so Escape closes it
-          // first — before the reading pane or the palette scope.
           if (snoozeOpen) {
             setSnoozeOpen(false);
             setSnoozeError(null);
@@ -599,28 +515,13 @@ export function InboxClient({
           goBack();
           break;
 
-        case 'openPalette':
-          setPaletteIndex(0);
-          setPaletteOpen(true);
-          break;
-
-        case 'closePalette':
-          closePalette();
-          break;
-
-        case 'palettePick': {
-          const entry = paletteResults[clampIndex(paletteIndex, paletteResults.length)];
-          if (entry) pickPaletteEntry(entry);
-          break;
-        }
-
         case 'toggleShowDone':
           setShowDone((current) => !current);
           setSelectedIndex(0);
           break;
 
         case 'cycleSort':
-          setSortMode(nextSortMode);
+          setSortOverride(nextViewSort(sort));
           setSelectedIndex(0);
           break;
 
@@ -640,8 +541,6 @@ export function InboxClient({
           break;
 
         case 'focusReply': {
-          // `r` is a shortcut *into* the compose box; the box itself then owns
-          // the keyboard, since `isTypingTarget` stands the shortcuts down.
           const input = document.querySelector<HTMLTextAreaElement>(
             '[data-testid="reply-input"]',
           );
@@ -655,39 +554,27 @@ export function InboxClient({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
     mode,
-    paletteOpen,
-    paletteIndex,
-    paletteResults,
+    sort,
     visibleItems.length,
     selectedItem,
     toggleDone,
     openSelected,
     goBack,
-    closePalette,
-    pickPaletteEntry,
     requestDrafts,
     snoozeOpen,
     helpOpen,
   ]);
 
-  // Keep the stored index in range when the list shrinks under the cursor
-  // (which is exactly what marking done does while done items are hidden).
   useEffect(() => {
     setSelectedIndex((current) => clampIndex(current, visibleItems.length));
   }, [visibleItems.length]);
 
-  // A sent/failed notice or a set of drafts belongs to one message. Carrying
-  // either to the next selection would attach it to the wrong person.
   useEffect(() => {
     setReplyError(null);
     setReplySentTs(null);
     setDrafts([]);
     setDraftsError(null);
   }, [selectedItem?.id]);
-
-  // -------------------------------------------------------------------------
-  // Render
-  // -------------------------------------------------------------------------
 
   return (
     <div className="flex h-screen flex-col bg-white text-neutral-900">
@@ -703,7 +590,7 @@ export function InboxClient({
           className="rounded-full bg-neutral-100 px-2 py-0.5 text-xs text-neutral-600"
           data-testid="queue-counts"
         >
-          {counts.open} open · {counts.done} done
+          {counts.open} open · {counts.done} complete
         </span>
 
         {scope ? (
@@ -750,14 +637,15 @@ export function InboxClient({
           <button
             type="button"
             onClick={() => {
-              setSortMode(nextSortMode);
+              setSortOverride(nextViewSort(sort));
               setSelectedIndex(0);
             }}
             data-testid="sort-mode-toggle"
-            data-sort-mode={sortMode}
+            data-sort-mode={sort}
+            title={`Sorting ${SORT_LABEL[sort].toLowerCase()}. Press s for the next order.`}
             className="rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50"
           >
-            Sort: {SORT_MODE_LABEL[sortMode]} <Kbd>s</Kbd>
+            Sort: {SORT_LABEL[sort]} <Kbd>s</Kbd>
           </button>
           {pendingSaves > 0 ? (
             <span className="text-xs text-neutral-400" data-testid="saving-indicator">
@@ -774,19 +662,45 @@ export function InboxClient({
             aria-pressed={showDone}
             className="rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50"
           >
-            {showDone ? 'Hide done' : 'Show done'} <Kbd>u</Kbd>
+            {showDone ? 'Hide completed' : 'Show completed'} <Kbd>u</Kbd>
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setPaletteIndex(0);
-              setPaletteOpen(true);
-            }}
-            data-testid="open-palette"
-            className="rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50"
+          {/* Whether the queue is actually following Slack. Without it, "live"
+              and "the stream died twenty minutes ago" look identical — which is
+              the failure mode that makes a push-updated inbox untrustworthy. */}
+          <span
+            data-testid="live-status"
+            data-status={liveStatus}
+            title={
+              liveStatus === 'live'
+                ? 'Live: new messages and woken snoozes appear on their own.'
+                : liveStatus === 'connecting'
+                  ? 'Connecting to the live stream…'
+                  : 'Not receiving live updates. Reload to catch up.'
+            }
+            className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${
+              liveStatus === 'live'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : liveStatus === 'connecting'
+                  ? 'border-neutral-200 text-neutral-500'
+                  : 'border-amber-300 bg-amber-50 text-amber-800'
+            }`}
           >
-            Jump to… <Kbd>⌘K</Kbd>
-          </button>
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 rounded-full ${
+                liveStatus === 'live'
+                  ? 'bg-emerald-500'
+                  : liveStatus === 'connecting'
+                    ? 'bg-neutral-400'
+                    : 'bg-amber-500'
+              }`}
+            />
+            {liveStatus === 'live'
+              ? 'Live'
+              : liveStatus === 'connecting'
+                ? 'Connecting'
+                : 'Offline'}
+          </span>
         </div>
       </header>
 
@@ -835,11 +749,12 @@ export function InboxClient({
           ref={listRef}
           tabIndex={-1}
           data-testid="queue-pane"
-          data-mode={paletteOpen ? 'palette' : mode}
+          data-mode={mode}
           data-hydrated={isHydrated ? 'true' : 'false'}
           data-pending-saves={pendingSaves}
           data-confirmed-saves={confirmedSaves}
-          data-sort-mode={sortMode}
+          data-sort-mode={sort}
+          data-live={liveStatus}
           data-active-view={activeView?.name ?? ''}
           data-replies-sent={replySentCount}
           data-reply-sending={replySending ? 'true' : 'false'}
@@ -850,7 +765,7 @@ export function InboxClient({
             selectedIndex={safeIndex}
             nowIso={nowIso}
             layout={activeView?.layout ?? 'detailed'}
-            showDayBuckets={sortMode === 'recency'}
+            showDayBuckets={isChronologicalSort(sort)}
             onSelect={setSelectedIndex}
             onOpen={(index) => {
               setSelectedIndex(index);
@@ -868,6 +783,7 @@ export function InboxClient({
             nowIso={nowIso}
             isFocused={mode === 'reading'}
             onToggleDone={toggleDone}
+            sentReplies={selectedItem ? sentReplies[selectedItem.id] : undefined}
             replySlot={
               selectedItem && isConnected ? (
                 <ReplyBox
@@ -889,17 +805,6 @@ export function InboxClient({
           />
         </div>
       </div>
-
-      <footer className="shrink-0 border-t border-neutral-200 px-4 py-1.5">
-        <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-neutral-500">
-          {SHORTCUT_HELP.map((shortcut) => (
-            <li key={shortcut.keys} className="flex items-center gap-1.5">
-              <Kbd>{shortcut.keys}</Kbd>
-              <span>{shortcut.description}</span>
-            </li>
-          ))}
-        </ul>
-      </footer>
 
       {helpOpen ? (
         <ShortcutOverlay onClose={() => setHelpOpen(false)} />
@@ -929,18 +834,6 @@ export function InboxClient({
             setBuilder(null);
             setBuilderError(null);
           }}
-        />
-      ) : null}
-
-      {paletteOpen ? (
-        <CommandPalette
-          entries={paletteEntries}
-          query={paletteQuery}
-          selectedIndex={paletteIndex}
-          onQueryChange={setPaletteQuery}
-          onSelectedIndexChange={setPaletteIndex}
-          onPick={pickPaletteEntry}
-          onClose={closePalette}
         />
       ) : null}
     </div>

@@ -127,6 +127,12 @@ threads to feel it with. Likely the first thing to fix once there is real data.
   bare flag shells out to `mkcert -install`, which needs an interactive sudo
   password, and Next **silently falls back to plain HTTP** when it cannot get
   one. The server looks healthy while Slack rejects every redirect URI.
+- **A live inbox is only as live as `npm run socket`.** The inbox now updates
+  itself, but what it watches is the database — so a new DM appears on its own
+  only while the Socket Mode listener is running to put it there. Snoozes are
+  different: those wake from inside the stream itself and need nothing else.
+  The header's `Live` badge means "the tab is connected to the stream", not
+  "Slack is connected"; the two are separate processes and can fail apart.
 - **Do not add a `loading.tsx` to `/inbox` or the app root.** A route-level
   Suspense boundary makes `revalidatePath('/inbox')` remount `InboxClient` and
   discard its state — sort mode, scroll position, selection, and in-flight save
@@ -143,7 +149,25 @@ threads to feel it with. Likely the first thing to fix once there is real data.
   `https://localhost:3000`; no tunnel is needed, because Slack events arrive over
   Socket Mode and the OAuth callback is only a browser redirect.
 
-## 9. Two Slack accounts are connected
+## 9. Burst grouping is structural, so it has two blind spots
+
+Consecutive messages from one person are now one row (see "Post-Phase-8 fixes"
+in `plan.md`). The rule is deliberately mechanical — anyone else speaking ends
+the run — which leaves two cases it gets arguably wrong:
+
+- **Two unrelated asks in a row are one row.** If someone sends you a question
+  about the deploy and then, with nothing in between, a question about
+  next week's offsite, you get one item. Marking it done covers both. Telling
+  them apart is a semantic judgement, which is a per-message LLM call over your
+  whole history — the spend CLAUDE.md rules out.
+- **A ping after your reply is a new row**, even if it is about the same thing.
+  That is the same conservative choice in the other direction: your reply is the
+  clearest signal available that the old task was handled.
+
+The row shows the newest message and rates itself by its most actionable one,
+so neither case can hide an urgent message behind a stale preview.
+
+## 10. Two Slack accounts are connected
 
 `SlackInstallation` holds rows for both `U0BEHBXNGHK` and `U0BK9FR4Y1M` in the
 same workspace. This is not a bug — the upsert key is `(teamId, authedUserId)`,

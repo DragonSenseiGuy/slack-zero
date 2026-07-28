@@ -1,30 +1,9 @@
-/**
- * Timestamp formatting for the queue.
- *
- * `now` is always an explicit argument rather than a call to `Date.now()`.
- * Two reasons: it makes the function testable without faking timers, and the
- * inbox is server-rendered then hydrated — reading the clock independently on
- * each side produces a React hydration mismatch on any message near a
- * boundary. The server passes one `now` down and both renders agree.
- *
- * Only relative labels are produced here. Absolute times are locale- and
- * timezone-dependent, so they are rendered after mount by the client (see
- * `useLocalTimestamp`), never during SSR.
- */
-
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const WEEK = 7 * DAY;
 const YEAR = 365 * DAY;
 
-/**
- * Compact relative label: "now", "5m", "3h", "2d", "6w", "1y".
- *
- * Compact rather than "5 minutes ago" because this sits in a dense list where
- * the column has to stay narrow and scannable. Clock skew (a message stamped
- * slightly in the future) reads as "now" instead of a negative number.
- */
 export function formatRelativeTime(iso: string, nowIso: string): string {
   const then = Date.parse(iso);
   const now = Date.parse(nowIso);
@@ -40,14 +19,6 @@ export function formatRelativeTime(iso: string, nowIso: string): string {
   return `${Math.floor(elapsed / YEAR)}y`;
 }
 
-/**
- * Long-form age: "just now", "5 minutes", "3 hours", "2 days", "3 weeks".
- *
- * The compact form above is right for a dense timestamp column; this one is for
- * prose — the bump staleness label and the classification prompt, both of which
- * read as sentences. Singular/plural is handled because "1 days ago" in a
- * user-facing string looks like a bug.
- */
 export function describeAge(iso: string, nowIso: string): string {
   const then = Date.parse(iso);
   const now = Date.parse(nowIso);
@@ -66,13 +37,6 @@ export function describeAge(iso: string, nowIso: string): string {
   return unit(Math.floor(elapsed / YEAR), 'year');
 }
 
-/**
- * The label a collapsed bump chain wears (plan.md, Phase 3: "a 3-message bump
- * chain should appear as 1 item showing 'first asked X days ago'").
- *
- * The point of collapsing is that a chase does *not* make the item look new —
- * so the row states how long the original ask has been sitting there.
- */
 export function bumpStalenessLabel(
   firstAskedAtIso: string,
   nowIso: string,
@@ -83,7 +47,59 @@ export function bumpStalenessLabel(
     : `first asked ${age} ago`;
 }
 
-/** Day bucket for the list's group headers. Also relative, also pure. */
+export function burstSpanLabel(
+  messageCount: number,
+  firstMessageAtIso: string,
+  nowIso: string,
+): string {
+  const count = `${messageCount} messages`;
+  const age = describeAge(firstMessageAtIso, nowIso);
+  return age === 'just now' ? count : `${count} · since ${age} ago`;
+}
+
+/** How long until `iso`, phrased like `describeAge` but forwards in time. */
+export function describeDelay(iso: string, nowIso: string): string {
+  return describeAge(nowIso, iso);
+}
+
+/**
+ * One line saying that this row is a snooze the user set for themselves, and
+ * where it is in its life.
+ *
+ * Exists because a woken snooze is otherwise indistinguishable from a message
+ * that just arrived — the sweep clears `snoozedUntil` to bring the item back,
+ * so the queue row loses the only evidence it was ever a reminder.
+ */
+export function snoozeStatusLabel(
+  snooze: {
+    state: 'pending' | 'returned';
+    untilIso: string;
+    returnedAtIso: string | null;
+    returnedReason: 'time' | 'activity' | 'manual' | null;
+  },
+  nowIso: string,
+): string {
+  if (snooze.state === 'pending') {
+    const delay = describeDelay(snooze.untilIso, nowIso);
+    return delay === 'just now'
+      ? 'Snoozed · due now'
+      : `Snoozed · back in ${delay}`;
+  }
+
+  const returnedAt = snooze.returnedAtIso ?? snooze.untilIso;
+  const age = describeAge(returnedAt, nowIso);
+  const when = age === 'just now' ? 'just now' : `${age} ago`;
+
+  switch (snooze.returnedReason) {
+    case 'activity':
+      return `Snoozed · woken early by new activity, ${when}`;
+    case 'manual':
+      return `Snoozed · you brought it back ${when}`;
+    default:
+      return `Snoozed · came back ${when}`;
+  }
+}
+
 export function formatDayBucket(iso: string, nowIso: string): string {
   const then = Date.parse(iso);
   const now = Date.parse(nowIso);

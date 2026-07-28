@@ -2,7 +2,11 @@
 
 import type { QueueItem } from '@/lib/queue/queue';
 import { effectiveUrgency } from '@/lib/queue/queue';
-import { bumpStalenessLabel } from '@/lib/queue/time';
+import {
+  bumpStalenessLabel,
+  burstSpanLabel,
+  snoozeStatusLabel,
+} from '@/lib/queue/time';
 import {
   CATEGORY_LABEL,
   urgencyBand,
@@ -10,17 +14,6 @@ import {
   type TriageCategory,
   type UrgencyBand,
 } from '@/lib/triage/types';
-
-/**
- * The visible half of the triage engine (plan.md, Phase 3).
- *
- * Three things have to be legible on a row: what the AI thinks the message
- * *is*, how urgent it thinks it is, and — for a collapsed chain — how long the
- * original ask has been waiting. The model's `reason` is shown in the reading
- * pane rather than here, because a list row has no space for a sentence and
- * hiding the score's justification entirely is exactly what CLAUDE.md rules
- * out.
- */
 
 const CATEGORY_CLASS: Record<TriageCategory, string> = {
   action_needed: 'bg-rose-100 text-rose-800',
@@ -63,11 +56,6 @@ export function UrgencyBadge({ score }: { score: number }) {
   );
 }
 
-/**
- * "first asked 3 days ago · 2 follow-ups" — the staleness the collapse exists
- * to surface. A chase must not make an item look new; this is what it looks
- * like instead.
- */
 export function BumpBadge({
   item,
   nowIso,
@@ -91,7 +79,60 @@ export function BumpBadge({
   );
 }
 
-/** The urgency/category pair, or a "pending" marker for an unclassified row. */
+export function GroupBadge({
+  item,
+  nowIso,
+}: {
+  item: QueueItem;
+  nowIso: string;
+}) {
+  if (!item.group) return null;
+
+  const { messageCount, firstMessageAtIso } = item.group;
+
+  return (
+    <span
+      data-testid="group-summary"
+      data-message-count={messageCount}
+      className="shrink-0 rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-900"
+    >
+      {burstSpanLabel(messageCount, firstMessageAtIso, nowIso)}
+    </span>
+  );
+}
+
+/**
+ * Marks a row as a reminder the user set for themselves — while it is hidden,
+ * and just as importantly once it has come back.
+ */
+export function SnoozeBadge({
+  item,
+  nowIso,
+}: {
+  item: QueueItem;
+  nowIso: string;
+}) {
+  if (!item.snooze) return null;
+
+  const isPending = item.snooze.state === 'pending';
+
+  return (
+    <span
+      data-testid="snooze-summary"
+      data-snooze-state={item.snooze.state}
+      data-snooze-reason={item.snooze.returnedReason ?? ''}
+      title={`Snoozed until ${item.snooze.untilIso}`}
+      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+        isPending
+          ? 'bg-neutral-200 text-neutral-700'
+          : 'bg-indigo-100 text-indigo-900'
+      }`}
+    >
+      ⏰ {snoozeStatusLabel(item.snooze, nowIso)}
+    </span>
+  );
+}
+
 export function TriageBadges({ item }: { item: QueueItem }) {
   const urgency = effectiveUrgency(item);
 

@@ -5,9 +5,9 @@ import {
   disconnectFixtures,
   getAuthedUserId,
   seedInboxFixtures,
-  FIXTURE_CHANNEL_NAME,
   FIXTURE_ITEM_COUNT,
 } from './fixtures/seed';
+import { loadInbox, loadScopedInbox } from './fixtures/page';
 
 /**
  * Phase 6, the database-backed half.
@@ -40,28 +40,8 @@ test.afterAll(async () => {
   await disconnectFixtures();
 });
 
-async function loadInbox(page: Page) {
-  await page.goto('/inbox');
-  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
-    'data-hydrated',
-    'true',
-  );
-}
-
-async function scopeToFixtures(page: Page) {
-  await page.keyboard.press('ControlOrMeta+k');
-  await expect(page.getByTestId('command-palette')).toBeVisible();
-  await page.getByTestId('command-palette-input').fill(FIXTURE_CHANNEL_NAME);
-  await expect(page.getByTestId('command-palette-result')).toHaveCount(1);
-  await page.keyboard.press('Enter');
-  await expect(page.getByTestId('scope-chip')).toContainText(
-    FIXTURE_CHANNEL_NAME,
-  );
-}
-
 async function openScopedInbox(page: Page) {
-  await loadInbox(page);
-  await scopeToFixtures(page);
+  await loadScopedInbox(page);
   await expect(page.getByTestId('queue-item')).toHaveCount(FIXTURE_ITEM_COUNT);
 }
 
@@ -101,8 +81,7 @@ test('snoozing removes the item from the queue and it stays gone after a reload'
   ).toHaveCount(0);
 
   // Still gone after a full reload — it was stored, not just hidden locally.
-  await loadInbox(page);
-  await scopeToFixtures(page);
+  await loadScopedInbox(page);
   await expect(page.getByTestId('queue-item')).toHaveCount(
     FIXTURE_ITEM_COUNT - 1,
   );

@@ -12,6 +12,7 @@ import {
   FIXTURE_FYI_MISC_COUNT,
   FIXTURE_ITEM_COUNT,
 } from './fixtures/seed';
+import { loadInbox, loadScopedInbox } from './fixtures/page';
 
 /**
  * Phase 4 verification (plan.md): create a custom view with 2 filters, save,
@@ -52,30 +53,8 @@ test.afterAll(async () => {
   await disconnectFixtures();
 });
 
-async function loadInbox(page: Page) {
-  await page.goto('/inbox');
-  await expect(page.getByTestId('queue-pane')).toHaveAttribute(
-    'data-hydrated',
-    'true',
-  );
-}
-
-/** Narrow to the fixture channel so counts are independent of real traffic. */
-async function scopeToFixtures(page: Page) {
-  await page.keyboard.press('ControlOrMeta+k');
-  await expect(page.getByTestId('command-palette')).toBeVisible();
-  await page.getByTestId('command-palette-input').fill(FIXTURE_CHANNEL_NAME);
-  await expect(page.getByTestId('command-palette-result')).toHaveCount(1);
-  await page.keyboard.press('Enter');
-  await expect(page.getByTestId('command-palette')).toBeHidden();
-  await expect(page.getByTestId('scope-chip')).toContainText(
-    FIXTURE_CHANNEL_NAME,
-  );
-}
-
 async function openScopedInbox(page: Page) {
-  await loadInbox(page);
-  await scopeToFixtures(page);
+  await loadScopedInbox(page);
 }
 
 function rows(page: Page) {
@@ -180,13 +159,12 @@ test('a custom view with 2 filters saves, survives a reload, and filters correct
   );
 
   // ---- the reload is the point of this test ----
-  await loadInbox(page);
+  await loadScopedInbox(page);
 
   // The view persisted across a full page load, from the database.
   await expect(page.getByTestId(`view-${CUSTOM_VIEW}`)).toBeVisible();
 
   await page.getByTestId(`view-${CUSTOM_VIEW}`).click();
-  await scopeToFixtures(page);
 
   // And it still filters: action_needed AND from a VIP.
   await expect(rows(page)).toHaveCount(FIXTURE_ACTION_NEEDED_COUNT);
@@ -194,9 +172,8 @@ test('a custom view with 2 filters saves, survives a reload, and filters correct
   // The filters really are ANDed — dropping VIP status must empty the view,
   // which no single-filter view would do.
   await setFixtureSenderVip(false);
-  await loadInbox(page);
+  await loadScopedInbox(page);
   await page.getByTestId(`view-${CUSTOM_VIEW}`).click();
-  await scopeToFixtures(page);
   await expect(rows(page)).toHaveCount(0);
   await expect(page.getByTestId('queue-empty')).toBeVisible();
 });
@@ -221,9 +198,8 @@ test('a saved view can be edited and the change persists', async ({ page }) => {
   await page.getByTestId('save-view').click();
   await expect(page.getByTestId('view-builder')).toBeHidden();
 
-  await loadInbox(page);
+  await loadScopedInbox(page);
   await page.getByTestId(`view-${CUSTOM_VIEW}`).click();
-  await scopeToFixtures(page);
   await expect(rows(page)).toHaveCount(FIXTURE_FYI_MISC_COUNT);
 });
 

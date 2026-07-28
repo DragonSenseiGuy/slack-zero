@@ -72,23 +72,32 @@ Press `?` in the inbox for the full list. The short version:
 | --- | --- |
 | `j` / `k` | Next / previous message |
 | `Enter` | Open in the reading pane |
-| `e` | Mark done (or undo) |
+| `e` | Mark as complete (or undo) |
 | `r` | Reply |
 | `d` | Suggest replies |
 | `h` | Snooze |
-| `u` | Show or hide done items |
-| `s` | Sort by urgency / recency |
+| `u` | Show or hide completed items |
+| `s` | Cycle the sort order |
 | `g` / `G` | First / last message |
-| `⌘K` | Jump to a channel or person |
 | `Esc` | Back / clear the filter |
 | `?` | This list |
 
 Shortcuts stand down while you are typing, so a reply containing "read" will not
-mark anything done.
+mark anything complete.
+
+`s` steps through every order a saved view can specify — newest, oldest, most
+urgent, VIP unreads on top — starting from whatever the active view asked for.
+The header always names the order the list is actually in.
+
+To narrow the queue to one conversation, use `/inbox?in=<channel-name>` (or a
+conversation id). `Esc` widens back out.
 
 ## What it does
 
-- **Unified queue** — DMs, mentions, and threads you are part of, in one list.
+- **Unified queue** — DMs, mentions, and threads you are part of, in one list,
+  updating live: a message arriving over Socket Mode or a snooze elapsing shows
+  up on its own, with no reload and without losing your place. The header says
+  `Live` while the connection is up, and `Offline` when it is not.
 - **AI triage** — urgency 0-100, `action_needed` / `fyi` / `misc`, and a stored
   one-line reason for every score, so the ordering can be argued with rather
   than taken on faith.
@@ -97,10 +106,14 @@ mark anything done.
   faking new activity.
 - **Saved views** — filter by category, source, VIP, bumped, urgency floor.
   Ships with Needs Reply, Waiting Room, Everything, and Waiting on Others.
+- **Conversation context** — DMs and mentions open with the ten messages that
+  came before, both halves of the exchange, and scroll further back for more.
+  Served from Postgres, so paging costs no Slack rate limit.
 - **Reply without leaving the queue** — inline compose, optional AI drafts,
-  auto-mark-done.
+  auto-mark-as-complete.
 - **Snooze** — later today / tomorrow / next week / custom, waking early if the
-  thread sees new activity before then.
+  thread sees new activity before then. A woken reminder still says it was one,
+  and why it came back.
 - **Waiting on others** — asks you sent that nobody has answered, with a
   staleness indicator.
 - **Stats** — median response time, triaged-per-day, streak, at `/stats`.

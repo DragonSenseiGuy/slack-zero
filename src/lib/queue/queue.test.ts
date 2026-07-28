@@ -2,14 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyQueueFilters,
+  assignBurstKeys,
   attachThreadReplies,
   buildQueue,
   clampIndex,
   collapseBumpChains,
+  collapseBursts,
   compareByRecency,
   compareByUrgency,
   contextLabelFor,
   effectiveUrgency,
+  itemMessageIds,
   matchesScope,
   moveSelection,
   nextSelectionAfterRemoval,
@@ -20,6 +23,7 @@ import {
   sortQueue,
   threadKey,
   toQueueItem,
+  toQueueSnooze,
   unclassifiedCount,
   userLabel,
   type QueueConversation,
@@ -30,10 +34,6 @@ import {
 import { bumpStalenessLabel } from '@/lib/queue/time';
 import type { MessageTriage, TriageCategory } from '@/lib/triage/types';
 
-/**
- * Fixture-driven, no database and no live Slack. Ids follow the shapes Phase 1
- * actually stores (`U...`, `D...`, `C...`) so the tests read like real data.
- */
 
 const ME = 'U0BK9FR4Y1M';
 const PEER = 'U0BEHBXNGHK';
@@ -138,8 +138,6 @@ function row(overrides: Partial<QueueMessageRow> = {}): QueueMessageRow {
 }
 
 const context = { authedUserId: ME };
-
-// ---------------------------------------------------------------------------
 
 describe('queueReasonFor', () => {
   it('includes a DM from someone else', () => {
@@ -906,5 +904,420 @@ describe('compareByUrgency', () => {
     const b = item('b', 1, { urgencyScore: 50 });
     expect(compareByUrgency(a, b)).toBe(-compareByUrgency(b, a));
     expect(compareByUrgency(a, a)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bursts: one person's uninterrupted run is one row
+// ---------------------------------------------------------------------------
+
+/** Rows in a fixed order, one minute apart, so runs are unambiguous. */
+function sequence(
+  overrides: readonly Partial<QueueMessageRow>[],
+): QueueMessageRow[] {
+  const start = Date.parse('2026-07-26T09:00:00.000Z');
+  return overrides.map((each, index) =>
+    row({
+      sentAt: new Date(start + index * 60_000),
+      ts: `${Math.floor(start / 1000) + index * 60}.000100`,
+      ...each,
+    }),
+  );
+}
+
+describe('assignBurstKeys', () => {
+  it('gives one key to consecutive messages from the same person', () => {
+    const rows = sequence([{ id: 'a' }, { id: 'b' }, { id: 'c' }]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.get('a')).toBe(keys.get('b'));
+    expect(keys.get('b')).toBe(keys.get('c'));
+  });
+
+  it('ends the run when the user replies — what follows is a new task', () => {
+    const rows = sequence([
+      { id: 'before' },
+      { id: 'mine', userId: ME },
+      { id: 'after' },
+    ]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.get('before')).not.toBe(keys.get('after'));
+  });
+
+  it('ends the run when somebody else speaks', () => {
+    const rows = sequence([
+      { id: 'peer1', conversation: MPIM },
+      { id: 'other', conversation: MPIM, userId: OTHER },
+      { id: 'peer2', conversation: MPIM },
+    ]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.get('peer1')).not.toBe(keys.get('peer2'));
+  });
+
+  it('is not broken by membership noise — "Bob joined" is not a new subject', () => {
+    const rows = sequence([
+      { id: 'a', conversation: CHANNEL, mentionedUserIds: [ME] },
+      { id: 'joined', conversation: CHANNEL, subtype: 'channel_join' },
+      { id: 'b', conversation: CHANNEL, mentionedUserIds: [ME] },
+    ]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.has('joined')).toBe(false);
+    expect(keys.get('a')).toBe(keys.get('b'));
+  });
+
+  it('never merges across conversations', () => {
+    const rows = sequence([
+      { id: 'dm' },
+      { id: 'channel', conversation: CHANNEL, mentionedUserIds: [ME] },
+    ]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.get('dm')).not.toBe(keys.get('channel'));
+  });
+
+  it('keeps a thread parent on its own, so its replies are not folded into it', () => {
+    const parentTs = '1784938500.000100';
+    const rows = sequence([
+      {
+        id: 'parent',
+        ts: parentTs,
+        threadTs: parentTs,
+        isThreadParent: true,
+        replyCount: 2,
+      },
+      { id: 'reply1', threadTs: parentTs, isThreadReply: true },
+      { id: 'reply2', threadTs: parentTs, isThreadReply: true },
+    ]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.get('parent')).not.toBe(keys.get('reply1'));
+    // Consecutive replies from one person are still one run between themselves.
+    expect(keys.get('reply1')).toBe(keys.get('reply2'));
+  });
+
+  it('keeps a thread and the conversation root apart', () => {
+    const parentTs = '1784938500.000100';
+    const rows = sequence([
+      { id: 'root' },
+      { id: 'reply', threadTs: parentTs, isThreadReply: true },
+    ]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.get('root')).not.toBe(keys.get('reply'));
+  });
+
+  it('ignores deleted messages entirely', () => {
+    const rows = sequence([{ id: 'a' }, { id: 'gone', isDeleted: true }, { id: 'b' }]);
+    const keys = assignBurstKeys(rows);
+
+    expect(keys.has('gone')).toBe(false);
+    expect(keys.get('a')).toBe(keys.get('b'));
+  });
+
+  it('does not depend on the order the rows arrive in', () => {
+    const rows = sequence([{ id: 'a' }, { id: 'mine', userId: ME }, { id: 'b' }]);
+    const forwards = assignBurstKeys(rows);
+    const backwards = assignBurstKeys([...rows].reverse());
+
+    expect(forwards.get('a') === forwards.get('b')).toBe(
+      backwards.get('a') === backwards.get('b'),
+    );
+  });
+});
+
+/** Queue items sharing one burst key, oldest first. */
+function burst(key: string, items: readonly QueueItem[]): QueueItem[] {
+  return items.map((each) => ({ ...each, burstKey: key }));
+}
+
+describe('collapseBursts', () => {
+  it('folds three consecutive DMs into one row that keeps the newest message', () => {
+    const run = burst('run', [
+      item('first', 3, {}, 'hey'),
+      item('second', 2, {}, 'quick q'),
+      item('third', 1, {}, 'can you review the migration?'),
+    ]);
+
+    const collapsed = collapseBursts(run);
+
+    expect(collapsed).toHaveLength(1);
+    const [only] = collapsed;
+
+    // The newest message is the one being answered, so it is the one on show —
+    // the opposite of a bump chain, and deliberately so.
+    expect(only.id).toBe('third');
+    expect(only.body).toBe('can you review the migration?');
+    expect(only.group?.messageCount).toBe(3);
+    expect(only.group?.messageIds).toEqual(['first', 'second', 'third']);
+    expect(only.group?.firstMessageAtIso).toBe(run[0].sentAtIso);
+    expect(only.group?.latestMessageAtIso).toBe(only.sentAtIso);
+  });
+
+  it('carries the earlier messages so nothing is hidden by collapsing', () => {
+    const run = burst('run', [
+      item('first', 3, {}, 'hey'),
+      item('second', 2, {}, 'quick q'),
+      item('third', 1, {}, 'still there?'),
+    ]);
+
+    const [only] = collapseBursts(run);
+
+    expect(only.group?.earlier.map((each) => each.body)).toEqual([
+      'hey',
+      'quick q',
+    ]);
+  });
+
+  it('leaves a single message alone, with no group', () => {
+    const [only] = collapseBursts([item('solo', 1, {})]);
+    expect(only.group).toBeNull();
+  });
+
+  it('is only done when every message in the run is done', () => {
+    const run = burst('run', [
+      { ...item('first', 2, {}), isDone: true, doneAtIso: NOW_ISO },
+      item('second', 1, {}),
+    ]);
+
+    const [partly] = collapseBursts(run);
+    expect(partly.isDone).toBe(false);
+
+    const [fully] = collapseBursts(
+      run.map((each) => ({ ...each, isDone: true, doneAtIso: NOW_ISO })),
+    );
+    expect(fully.isDone).toBe(true);
+    expect(fully.doneAtIso).toBe(NOW_ISO);
+  });
+
+  it('is rated by its most actionable message, not its newest', () => {
+    // "ok cool" after "the deploy is broken" must not demote the row out of the
+    // Needs Reply view: the ask is still unanswered.
+    const run = burst('run', [
+      item('ask', 2, { category: 'action_needed', urgencyScore: 80 }),
+      item('chatter', 1, { category: 'misc', urgencyScore: 10 }),
+    ]);
+
+    const [only] = collapseBursts(run);
+
+    expect(only.triage?.category).toBe('action_needed');
+    expect(only.group?.peakUrgencyScore).toBe(80);
+    expect(effectiveUrgency(only)).toBe(80);
+  });
+
+  it('keeps a file marker from an earlier message in the run', () => {
+    const run = burst('run', [
+      { ...item('withFile', 2, {}), hasFiles: true },
+      item('plain', 1, {}),
+    ]);
+
+    expect(collapseBursts(run)[0].hasFiles).toBe(true);
+  });
+
+  it('reports every message id behind the row, for actions to apply to', () => {
+    const run = burst('run', [item('a', 2, {}), item('b', 1, {})]);
+    expect(itemMessageIds(collapseBursts(run)[0]).sort()).toEqual(['a', 'b']);
+  });
+
+  it('keeps separate runs separate', () => {
+    const items = [
+      ...burst('run-1', [item('a', 4, {}), item('b', 3, {})]),
+      ...burst('run-2', [item('c', 2, {}), item('d', 1, {})]),
+    ];
+
+    expect(collapseBursts(items).map((each) => each.id)).toEqual(['b', 'd']);
+  });
+});
+
+describe('bursts end to end', () => {
+  it('shows three DMs from one person as one queue row', () => {
+    // The bug this fixes: every DM was its own task, so a person firing off
+    // three lines filled three rows of the queue.
+    const rows = sequence([
+      { id: 'a', text: 'hey' },
+      { id: 'b', text: 'you around?' },
+      { id: 'c', text: 'need a review on #412' },
+    ]);
+
+    const queue = buildQueue(rows, {
+      ...context,
+      users: USERS,
+      conversations: CONVERSATIONS,
+    });
+    expect(queue).toHaveLength(3);
+
+    const sorted = sortQueue(queue, { mode: 'urgency' });
+    expect(sorted).toHaveLength(1);
+    expect(sorted[0].preview).toBe('need a review on #412');
+    expect(sorted[0].group?.messageCount).toBe(3);
+  });
+
+  it('splits the run at the user’s own reply — a new ask is a new row', () => {
+    const rows = sequence([
+      { id: 'a', text: 'can you look at this?' },
+      { id: 'mine', userId: ME, text: 'yes, on it' },
+      { id: 'b', text: 'thanks — one more thing' },
+    ]);
+
+    const sorted = sortQueue(
+      buildQueue(rows, { ...context, users: USERS, conversations: CONVERSATIONS }),
+      { mode: 'recency' },
+    );
+
+    expect(sorted.map((each) => each.id)).toEqual(['b', 'a']);
+  });
+
+  it('can be asked not to group', () => {
+    const rows = sequence([{ id: 'a' }, { id: 'b' }]);
+    const queue = buildQueue(rows, { ...context, users: USERS });
+
+    expect(sortQueue(queue, { mode: 'recency', groupBursts: false })).toHaveLength(2);
+  });
+
+  it('does not double-count a bump the burst already folded in', () => {
+    // The model flags the second message as a bump of the first, and they are
+    // also consecutive. Collapsing twice must not produce a phantom follow-up.
+    const rows = sequence([
+      { id: 'ask', text: 'can you review the migration?' },
+      { id: 'chase', text: 'any update?' },
+    ]);
+
+    const queue = buildQueue(rows, {
+      ...context,
+      users: USERS,
+      conversations: CONVERSATIONS,
+    }).map((each) =>
+      each.id === 'chase'
+        ? {
+            ...each,
+            triage: triage({ isBump: true, bumpOfMessageId: 'ask' }),
+          }
+        : each,
+    );
+
+    const sorted = sortQueue(queue, { mode: 'recency' });
+
+    expect(sorted).toHaveLength(1);
+    expect(sorted[0].group?.messageCount).toBe(2);
+    expect(sorted[0].bumps).toBeNull();
+    expect(itemMessageIds(sorted[0]).sort()).toEqual(['ask', 'chase']);
+  });
+
+  it('still collapses a bump that arrived after the user replied', () => {
+    // Here the burst pass cannot help — the reply between them ends the run —
+    // so this is exactly the residue `collapseBumpChains` exists for.
+    const rows = sequence([
+      { id: 'ask', text: 'can you review the migration?' },
+      { id: 'mine', userId: ME, text: 'looking now' },
+      { id: 'chase', text: 'any update?' },
+    ]);
+
+    const queue = buildQueue(rows, {
+      ...context,
+      users: USERS,
+      conversations: CONVERSATIONS,
+    }).map((each) =>
+      each.id === 'chase'
+        ? { ...each, triage: triage({ isBump: true, bumpOfMessageId: 'ask' }) }
+        : each,
+    );
+
+    const sorted = sortQueue(queue, { mode: 'recency' });
+
+    expect(sorted).toHaveLength(1);
+    expect(sorted[0].id).toBe('ask');
+    expect(sorted[0].bumps?.bumpCount).toBe(1);
+  });
+});
+
+describe('toQueueSnooze', () => {
+  const UNTIL = new Date('2026-07-27T17:00:00.000Z');
+  const WOKE = new Date('2026-07-27T17:00:04.000Z');
+
+  it('is null for a message that was never snoozed', () => {
+    expect(toQueueSnooze({})).toBeNull();
+  });
+
+  it('reports a running snooze as pending', () => {
+    expect(toQueueSnooze({ snoozedUntil: UNTIL })).toEqual({
+      state: 'pending',
+      untilIso: UNTIL.toISOString(),
+      returnedAtIso: null,
+      returnedReason: null,
+    });
+  });
+
+  // The regression this whole field exists to prevent: the sweeps null out
+  // `snoozedUntil` to wake an item, so a returned reminder used to look
+  // identical to a message that had just arrived.
+  it('still reports a snooze after the sweep cleared snoozedUntil', () => {
+    expect(
+      toQueueSnooze({
+        snoozedUntil: null,
+        lastSnoozedUntil: UNTIL,
+        unsnoozedAt: WOKE,
+        unsnoozeReason: 'time',
+      }),
+    ).toEqual({
+      state: 'returned',
+      untilIso: UNTIL.toISOString(),
+      returnedAtIso: WOKE.toISOString(),
+      returnedReason: 'time',
+    });
+  });
+
+  it('keeps the pending reading when a returned item is snoozed again', () => {
+    const again = new Date('2026-07-28T09:00:00.000Z');
+    expect(
+      toQueueSnooze({
+        snoozedUntil: again,
+        lastSnoozedUntil: UNTIL,
+        unsnoozedAt: WOKE,
+        unsnoozeReason: 'time',
+      }),
+    ).toMatchObject({ state: 'pending', untilIso: again.toISOString() });
+  });
+
+  it('drops a reason it does not recognise rather than passing it through', () => {
+    expect(
+      toQueueSnooze({
+        lastSnoozedUntil: UNTIL,
+        unsnoozedAt: WOKE,
+        unsnoozeReason: 'something-else',
+      })?.returnedReason,
+    ).toBeNull();
+  });
+
+  it('falls back to the wake time when the due time was not recorded', () => {
+    expect(toQueueSnooze({ unsnoozedAt: WOKE })).toMatchObject({
+      state: 'returned',
+      untilIso: WOKE.toISOString(),
+    });
+  });
+});
+
+describe('toQueueItem snooze', () => {
+  it('carries the snooze onto the queue item', () => {
+    const woke = new Date('2026-07-27T17:00:04.000Z');
+    const item = toQueueItem(
+      row({
+        conversation: IM,
+        userId: PEER,
+        lastSnoozedUntil: new Date('2026-07-27T17:00:00.000Z'),
+        unsnoozedAt: woke,
+        unsnoozeReason: 'activity',
+      }),
+      'dm',
+      USERS,
+      CONVERSATIONS,
+    );
+
+    expect(item.snoozedUntilIso).toBeNull();
+    expect(item.snooze).toMatchObject({
+      state: 'returned',
+      returnedReason: 'activity',
+    });
   });
 });

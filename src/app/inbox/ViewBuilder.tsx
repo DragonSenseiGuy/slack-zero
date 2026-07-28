@@ -17,16 +17,7 @@ import {
 } from '@/lib/views/filters';
 import { CATEGORY_LABEL, TRIAGE_CATEGORIES, type TriageCategory } from '@/lib/triage/types';
 
-/**
- * The view builder (plan.md, Phase 4): name, layout, filters, sort.
- *
- * Deliberately dumb — it edits a draft and hands it back. Whether the resulting
- * filter set actually matches anything is `lib/views/filters.ts`'s job, and that
- * is where the tests are.
- */
-
 export type ViewBuilderProps = {
-  /** Null when creating; the view being edited otherwise. */
   view: SavedView | null;
   busy: boolean;
   error: string | null;
@@ -60,7 +51,6 @@ export function ViewBuilder({
   const [sort, setSort] = useState<ViewSort>(view?.sort ?? 'urgency');
   const [filters, setFilters] = useState<ViewFilters>(view?.filters ?? {});
 
-  // Re-seed when the dialog is reused for a different view.
   useEffect(() => {
     setName(view?.name ?? '');
     setLayout(view?.layout ?? 'detailed');
@@ -176,7 +166,7 @@ export function ViewBuilder({
                 ['vipOnly', 'VIP only'],
                 ['hasBump', 'Has been bumped'],
                 ['classifiedOnly', 'Classified only'],
-                ['includeDone', 'Include done'],
+                ['includeDone', 'Include completed'],
               ] as const
             ).map(([key, label]) => (
               <label key={key} className="flex items-center gap-1.5">

@@ -49,6 +49,9 @@ describe('handleMessageEvent', () => {
       action: 'created',
       conversationId: 'D0BKMJLRRNH',
       ts: '1784938592.138359',
+      // Carried through so the listener can hydrate an unknown author's
+      // profile after the event is committed (see `hydrate.ts`).
+      userId: 'U0BEHBXNGHK',
     });
     expect(upsertMessage).toHaveBeenCalledWith(
       expect.objectContaining({ ts: '1784938592.138359', text: 'hello' }),

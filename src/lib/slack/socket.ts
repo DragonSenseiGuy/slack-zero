@@ -6,6 +6,7 @@ import {
   markMessageDeleted,
   upsertMessage,
 } from '@/lib/slack/ingest';
+import { hydrateStubUsers } from '@/lib/slack/hydrate';
 import { normalizeMessageEvent } from '@/lib/slack/normalize';
 import type { RawReactionEvent, RawSlackMessage } from '@/lib/slack/raw';
 import {
@@ -32,8 +33,8 @@ import {
  */
 
 export type IngestResult =
-  | { action: 'created'; conversationId: string; ts: string }
-  | { action: 'updated'; conversationId: string; ts: string }
+  | { action: 'created'; conversationId: string; ts: string; userId: string | null }
+  | { action: 'updated'; conversationId: string; ts: string; userId: string | null }
   | { action: 'deleted'; conversationId: string; ts: string }
   | { action: 'reaction'; conversationId: string; ts: string; name: string }
   | { action: 'ignored'; reason: string };
@@ -83,6 +84,7 @@ export async function handleMessageEvent(
         action: outcome,
         conversationId: normalized.message.conversationId,
         ts: normalized.message.ts,
+        userId: normalized.message.userId,
       };
     }
   }
@@ -163,6 +165,17 @@ export async function startSocketModeListener(
         // `handleMessageEvent`, which stays a pure ingest path.
         if (result.action === 'created') {
           scheduleClassificationForSlackMessage(result.conversationId, result.ts);
+        }
+
+        // Same shape, same reason: an author who joined since the last
+        // backfill has only a stub `User` row, which would render in the queue
+        // as a raw `U…` id. Resolve it with `users.info` after the message is
+        // committed, without blocking the ack path.
+        if (
+          (result.action === 'created' || result.action === 'updated') &&
+          result.userId
+        ) {
+          void hydrateStubUsers([result.userId], { onLog: log });
         }
 
         log(

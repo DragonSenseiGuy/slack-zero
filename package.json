@@ -22,6 +22,7 @@
     "triage:eval": "tsx scripts/triage-eval.ts",
     "draft:eval": "tsx scripts/draft-eval.ts",
     "socket": "tsx scripts/socket.ts",
+    "hydrate:users": "tsx scripts/hydrate-users.ts",
     "snooze:sweep": "tsx scripts/snooze-sweep.ts",
     "waiting:scan": "tsx scripts/waiting-scan.ts",
     "postinstall": "prisma generate"

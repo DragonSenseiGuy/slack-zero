@@ -2,19 +2,9 @@
 
 import { describeFilters, type SavedView } from '@/lib/views/filters';
 
-/**
- * Saved views, listed down the left (plan.md, Phase 4).
- *
- * Switching is pure client state — the parent already holds every message, so a
- * view change is a re-filter, not a fetch. That is what "view switching without
- * full page reload" means here, and it is why the counts next to each view are
- * free to compute.
- */
-
 export type ViewSidebarProps = {
   views: SavedView[];
   activeViewId: string | null;
-  /** Open-item count per view id, computed by the parent. */
   counts: Record<string, number>;
   onSelect: (view: SavedView) => void;
   onNew: () => void;

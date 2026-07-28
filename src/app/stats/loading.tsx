@@ -1,4 +1,3 @@
-/** Stats loading state (plan.md, Phase 8). */
 export default function StatsLoading() {
   return (
     <main className="mx-auto max-w-4xl p-8" data-testid="stats-loading">

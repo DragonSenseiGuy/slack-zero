@@ -2,31 +2,6 @@ import { z } from 'zod';
 
 import { describeAge } from '@/lib/queue/time';
 
-/**
- * Reply-draft prompt and response parsing (plan.md, Phase 5).
- *
- * Pure, like `triage/prompt.ts`: this file decides *what* to ask and *how* to
- * read the answer, and `generate.ts` makes the call. That split is what makes
- * plan.md's "unit test the reply-draft prompt/response parsing" possible with no
- * live provider (CLAUDE.md forbids unit tests that hit the API).
- *
- * The model is the environment default `qwen/qwen3-32b` — drafting is
- * per-message work, so the 2026-07-24 no-frontier-models decision applies here
- * exactly as it does to classification.
- */
-
-// ---------------------------------------------------------------------------
-// Vocabulary
-// ---------------------------------------------------------------------------
-
-/**
- * The reply patterns plan.md names, plus `answer` as the catch-all.
- *
- * These are *labels for suggestions*, not a classification of the incoming
- * message — the model proposes up to one draft per pattern that actually fits,
- * so a message asking to book a meeting yields `scheduling` and probably `ack`,
- * but not `approval`.
- */
 export const DRAFT_KINDS = [
   'ack',
   'answer',
@@ -50,7 +25,6 @@ export const DRAFT_KIND_LABEL: Record<DraftKind, string> = {
   decline: 'Decline',
 };
 
-/** Stable order for rendering, independent of the order the model replied in. */
 const KIND_RANK: Record<DraftKind, number> = {
   answer: 0,
   approval: 1,
@@ -61,33 +35,12 @@ const KIND_RANK: Record<DraftKind, number> = {
 
 export type ReplyDraft = {
   kind: DraftKind;
-  /** The reply text, ready to send as-is. */
   text: string;
 };
 
-/** How many drafts to offer. More than three is a menu, not a suggestion. */
 export const MAX_DRAFTS = 3;
-
-/**
- * Generous, for the same reason as classification: `qwen/qwen3-32b` is a
- * reasoning model whose hidden reasoning spends the `max_tokens` budget before
- * any content is emitted. Drafting produces more output than a classification
- * JSON blob, so this is larger still.
- *
- * Measured, not guessed: at 1600 the "blocked colleague" case in
- * `npm run draft:eval` failed outright with `finish_reason: 'length'` and zero
- * content — the model spent the whole budget reasoning. That happened *because*
- * the system prompt was tightened to stop it inventing specifics: more rules to
- * weigh means more reasoning. Anyone editing the prompt should re-run
- * `npm run draft:eval` and expect to move this number with it.
- */
 export const DRAFT_MAX_TOKENS = 3000;
 
-/**
- * Drafting is the one place a little variation is fine — three suggestions that
- * are near-identical are useless. Still low: a reply the user is one keystroke
- * from sending should not be a creative risk.
- */
 export const DRAFT_TEMPERATURE = 0.3;
 
 // ---------------------------------------------------------------------------
@@ -95,17 +48,14 @@ export const DRAFT_TEMPERATURE = 0.3;
 // ---------------------------------------------------------------------------
 
 export type DraftContext = {
-  /** The message being replied to, already rendered to plain text. */
   text: string;
   senderLabel: string;
-  /** How the user should be referred to in the third person, if needed. */
   selfLabel: string;
   contextLabel: string;
   isDirectMessage: boolean;
   isThread: boolean;
   sentAtIso: string;
   nowIso: string;
-  /** Recent conversation, oldest first, for tone and continuity. */
   history?: readonly { author: string; text: string }[];
 };
 
@@ -184,10 +134,6 @@ export function buildDraftUserPrompt(context: DraftContext): string {
   return lines.join('\n');
 }
 
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
-
 export class DraftParseError extends Error {
   readonly raw: string;
 
@@ -211,20 +157,11 @@ const responseSchema = z.object({
   drafts: z.array(z.object({ kind: z.unknown(), text: z.unknown() })),
 });
 
-/** Longer than this is not a Slack reply, and would not fit the compose box. */
 export const MAX_DRAFT_LENGTH = 600;
 
-/**
- * Strip markdown the prompt asked the model not to use.
- *
- * Kept deliberately narrow — leading bullets and surrounding quotes, which are
- * the two things the model actually does. Anything more aggressive would start
- * mangling legitimate reply text like "the **only** blocker".
- */
 function tidy(text: string): string {
   let out = text.trim();
   out = out.replace(/^\s*[-*•]\s+/, '');
-  // A whole-string wrap in matching quotes: the model quoting its own draft.
   if (
     (out.startsWith('"') && out.endsWith('"') && out.length > 1) ||
     (out.startsWith('“') && out.endsWith('”'))
@@ -234,13 +171,6 @@ function tidy(text: string): string {
   return collapse(out);
 }
 
-/**
- * Read a model response into a list of drafts.
- *
- * Skips individual malformed drafts rather than throwing the whole set away — if
- * two of three are usable, offering two beats offering none. Throws only when
- * nothing usable survives, which is a real failure the caller should surface.
- */
 export function parseDraftResponse(raw: string): ReplyDraft[] {
   const body = stripFence(raw);
 
@@ -276,7 +206,6 @@ export function parseDraftResponse(raw: string): ReplyDraft[] {
     const text = tidy(candidate.text);
     if (text === '') continue;
     if (text.length > MAX_DRAFT_LENGTH) continue;
-    // One draft per kind: two "ack"s are the same suggestion twice.
     if (seenKinds.has(candidate.kind)) continue;
 
     seenKinds.add(candidate.kind);
@@ -292,13 +221,6 @@ export function parseDraftResponse(raw: string): ReplyDraft[] {
     .slice(0, MAX_DRAFTS);
 }
 
-/**
- * Does a draft still contain a blank the user must fill in?
- *
- * The prompt asks the model to leave `[time]`-style placeholders rather than
- * invent specifics. Sending one of those verbatim to a colleague would be worse
- * than sending nothing, so the UI must not offer one-key send on it.
- */
 export function hasPlaceholder(text: string): boolean {
   return /\[[^\]\n]{1,40}\]/.test(text);
 }

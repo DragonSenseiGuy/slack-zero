@@ -32,7 +32,7 @@ vi.mock('@/lib/slack/installation', () => ({
 }));
 
 const STATE_SECRET = 'unit-test-state-secret';
-const BASE_URL = 'https://localhost:3000';
+const BASE_URL = 'https://localhost:3000'; // TODO: change to a universal base_url
 
 /** A realistic successful `oauth.v2.access` response for a user-token app. */
 const SLACK_SUCCESS = {
@@ -98,7 +98,6 @@ function buildRequest(options: RequestOptions): NextRequest {
   return new NextRequest(url, { headers });
 }
 
-/** Query params of the Location header, for asserting redirect outcomes. */
 function redirectParams(location: string | null): URLSearchParams {
   expect(location).toBeTruthy();
   return new URL(location as string).searchParams;
@@ -364,3 +363,5 @@ describe('GET /api/slack/oauth/callback — failure paths', () => {
     expect(mockSaveInstallation).not.toHaveBeenCalled();
   });
 });
+
+// TODO: this file feels too big lol, try to make it smaller somehow

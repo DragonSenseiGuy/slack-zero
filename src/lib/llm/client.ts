@@ -2,25 +2,6 @@ import OpenAI from 'openai';
 
 import { getEnv, isLlmConfigured, requireLlmEnv } from '@/lib/env';
 
-/**
- * The ONE place this app talks to an LLM.
- *
- * Provider: Hack Club AI (https://ai.hackclub.com), an OpenAI-compatible proxy.
- * This is a deliberate swap away from calling the Anthropic API directly —
- * user decision, 2026-07-24. Larger models are still reachable through the same
- * proxy, but the default is deliberately the small open-weight
- * `qwen/qwen3-32b`: classification is per-message and high-volume, so frontier
- * models are off the table for it. Only override `model` per-call if a task
- * demonstrably fails on the default, and flag it when you do.
- *
- * Everything else in the app must import from this module rather than reaching
- * for `openai` (or any other SDK) directly, so that swapping providers later is
- * a one-file change. The exported surface is intentionally narrow: `chat()`,
- * plus a reachability `ping()` for the health check.
- *
- * Server-side only — the API key must never reach the browser.
- */
-
 if (typeof window !== 'undefined') {
   throw new Error(
     'src/lib/llm/client.ts is server-only and must not be imported from client components.',
@@ -35,25 +16,18 @@ export type ChatMessage = {
 };
 
 export type ChatRequest = {
-  /** System prompt. Kept separate from the turn list on purpose. */
   system?: string;
   messages: ChatMessage[];
-  /** Defaults to LLM_MODEL from the environment. */
   model?: string;
-  /** `'json'` asks the provider for a JSON object back. */
   responseFormat?: 'text' | 'json';
   temperature?: number;
   maxTokens?: number;
-  /** Abort/timeouts from callers. */
   signal?: AbortSignal;
 };
 
 export type ChatResponse = {
-  /** Assistant text. Empty string if the provider returned no content. */
   text: string;
-  /** Model that actually served the request, as reported by the provider. */
   model: string;
-  /** Provider's stop reason, e.g. `'stop'` or `'length'`. */
   finishReason?: string;
   usage?: {
     promptTokens: number;
@@ -62,10 +36,8 @@ export type ChatResponse = {
   };
 };
 
-/** Thrown for provider-side failures so callers can distinguish them. */
 export class LlmError extends Error {
   readonly status?: number;
-  /** Hack Club AI allows 450 chat/embedding requests per 30 minutes. */
   readonly isRateLimit: boolean;
 
   constructor(message: string, status?: number) {
@@ -82,7 +54,6 @@ let clientKey: string | undefined;
 function getClient(): { openai: OpenAI; model: string } {
   const { baseUrl, apiKey, model } = requireLlmEnv();
 
-  // Rebuild if the key/base changed (matters in tests more than at runtime).
   const cacheKey = `${baseUrl}::${apiKey}`;
   if (!client || clientKey !== cacheKey) {
     client = new OpenAI({ baseURL: baseUrl, apiKey });
@@ -92,7 +63,6 @@ function getClient(): { openai: OpenAI; model: string } {
   return { openai: client, model };
 }
 
-/** Test/dev helper: forget the memoized SDK instance. */
 export function resetLlmClient(): void {
   client = undefined;
   clientKey = undefined;
@@ -134,12 +104,6 @@ export async function chat(request: ChatRequest): Promise<ChatResponse> {
     const text = choice?.message?.content ?? '';
     const finishReason = choice?.finish_reason;
 
-    // Reasoning models (the default `qwen/qwen3-32b` included) spend part of
-    // the max_tokens budget on hidden reasoning before emitting any content.
-    // The proxy returns that separately (`message.reasoning`), so it never
-    // pollutes `content` — but if the budget runs out during reasoning, the
-    // provider replies with `content: null` and `finish_reason: 'length'`.
-    // Failing loudly beats handing callers a silent empty string to parse.
     if (text === '' && finishReason === 'length') {
       throw new LlmError(
         'Hack Club AI returned no content: the response was truncated ' +
@@ -162,7 +126,6 @@ export async function chat(request: ChatRequest): Promise<ChatResponse> {
         : undefined,
     };
   } catch (error) {
-    // Our own truncation error above is already well-formed; don't re-wrap it.
     if (error instanceof LlmError) {
       throw error;
     }
@@ -183,12 +146,6 @@ export type LlmPingResult =
   | { status: 'not_configured' }
   | { status: 'error'; error: string };
 
-/**
- * Cheap reachability check for the health endpoint.
- *
- * Hits `GET <base>/models`, which needs no auth and costs no tokens, so it
- * confirms the proxy is reachable without burning rate limit on completions.
- */
 export async function ping(timeoutMs = 5_000): Promise<LlmPingResult> {
   const env = getEnv();
 

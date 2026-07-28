@@ -9,13 +9,6 @@ import {
   type SnoozePreset,
 } from '@/lib/snooze/schedule';
 
-/**
- * The snooze time picker (plan.md, Phase 6).
- *
- * Presets resolve against a `now` passed in from the parent rather than read
- * here, matching the rest of the app — a component that reads the clock during
- * render disagrees with the server's HTML and breaks hydration.
- */
 
 export type SnoozeMenuProps = {
   nowIso: string;
@@ -56,11 +49,6 @@ export function SnoozeMenu({
     toLocalInputValue(new Date(now.getTime() + 60 * 60_000)),
   );
   const ref = useRef<HTMLDivElement | null>(null);
-
-  // No key listener here on purpose. `InboxClient` owns the keyboard for the
-  // whole inbox, and a second window listener meant Escape raced between
-  // closing this menu and the list's own "back" action. One dispatcher, one
-  // outcome.
 
   return (
     <div
@@ -122,9 +110,6 @@ export function SnoozeMenu({
               disabled={busy || custom === ''}
               data-testid="snooze-custom-submit"
               onClick={() => {
-                // The input is local time; `new Date(local)` parses it as local
-                // and `toISOString` converts. Doing this in the component keeps
-                // the server action's contract UTC-only.
                 const parsed = new Date(custom);
                 if (Number.isNaN(parsed.getTime())) return;
                 onSnooze('custom', parsed.toISOString());

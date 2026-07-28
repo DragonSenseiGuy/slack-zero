@@ -1,6 +1,5 @@
 import Link from 'next/link';
 
-/** 404 (plan.md, Phase 8). */
 export default function NotFound() {
   return (
     <main className="mx-auto max-w-2xl p-8" data-testid="not-found">

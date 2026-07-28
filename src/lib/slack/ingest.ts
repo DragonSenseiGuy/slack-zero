@@ -8,19 +8,6 @@ import type {
   NormalizedUser,
 } from '@/lib/slack/normalize';
 
-/**
- * Persistence for normalized Slack data.
- *
- * The idempotency contract lives here: every write is an upsert keyed on a
- * Slack-owned identity (`User.id`, `Conversation.id`,
- * `Message(conversationId, ts)`), so re-running backfill, or receiving the same
- * event twice from Socket Mode, converges instead of duplicating.
- *
- * This module only accepts `Normalized*` types — it cannot be handed a raw
- * Slack payload, which is what keeps the boundary in `normalize.ts` honest.
- */
-
-/** Whether an upsert inserted a new row or refreshed an existing one. */
 export type UpsertOutcome = 'created' | 'updated';
 
 /**

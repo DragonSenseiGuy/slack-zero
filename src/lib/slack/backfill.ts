@@ -18,28 +18,8 @@ import {
 import { getSlackContext } from '@/lib/slack/client';
 import type { RawSlackConversation, RawSlackMessage } from '@/lib/slack/raw';
 
-/**
- * Initial backfill: pull the authed user's DMs, group DMs, and channel
- * mentions into the DB.
- *
- * Scope is exactly plan.md's Phase 1 wording — "recent DMs, mpims, and channel
- * mentions for the authed user" — *not* the full history of every channel in
- * the workspace. Concretely:
- *
- *   1. `users.list`           → a `User` row per workspace member
- *   2. `conversations.list`   → a `Conversation` row per DM/mpim/channel
- *   3. `conversations.history`→ messages, for IMs and mpims only
- *   4. `search.messages`      → channel messages that mention the authed user
- *   5. `conversations.replies`→ replies under any thread parent we ingested
- *
- * Classification is not called from here, per CLAUDE.md: ingestion must never
- * block on the LLM. That is Phase 3's job.
- */
-
-/** A conversation Slack refused to give us; recorded rather than thrown. */
 export type ConversationSyncError = {
   conversationId: string;
-  /** Slack's error code, e.g. "channel_not_found". */
   error: string;
 };
 
@@ -57,7 +37,6 @@ export type BackfillStats = {
     historyRead: number;
   };
   messages: BackfillCounts & {
-    /** Payloads that could not be normalized (no `ts`); counted, not fatal. */
     skipped: number;
   };
   threads: { parents: number; repliesFetched: number };
@@ -69,25 +48,16 @@ export type BackfillStats = {
 };
 
 export type BackfillOptions = {
-  /**
-   * Max messages to pull per conversation. Slack caps a single page at 1000;
-   * this bounds the total across pages.
-   */
   messagesPerConversation?: number;
-  /** Oldest Slack ts to fetch. Omit for "everything available". */
   oldestTs?: string;
-  /** Include the `search.messages` mention pass. */
   includeMentions?: boolean;
-  /** Include the `conversations.replies` thread pass. */
   includeThreads?: boolean;
-  /** Progress sink. Defaults to a no-op so library use stays silent. */
   onProgress?: (message: string) => void;
 };
 
 const DEFAULT_MESSAGES_PER_CONVERSATION = 500;
 const SLACK_PAGE_SIZE = 200;
 
-/** Slack error code from a thrown `WebAPIPlatformError`, if it has one. */
 function slackErrorCode(error: unknown): string {
   if (typeof error === 'object' && error !== null) {
     const data = (error as { data?: { error?: unknown } }).data;
@@ -160,14 +130,6 @@ async function backfillConversationList(
   return all;
 }
 
-/**
- * Pull one conversation's history.
- *
- * A Slack failure here is recorded and skipped, not rethrown: the Slackbot DM,
- * for instance, is returned by `conversations.list` but answers
- * `channel_not_found` to `conversations.history`, and one such quirk must not
- * abort the whole backfill.
- */
 async function backfillHistory(
   client: WebClient,
   conversationId: string,
@@ -208,7 +170,6 @@ async function backfillHistory(
   return collected;
 }
 
-/** Normalize + persist one raw message, counting the outcome. */
 async function ingestOne(
   raw: RawSlackMessage,
   conversationId: string,
@@ -226,14 +187,6 @@ async function ingestOne(
   }
 }
 
-/**
- * Channel messages that mention the authed user.
- *
- * `search.messages` is user-token only (hence the `search:read` scope) and
- * returns a thinner message object than `conversations.history` — no blocks,
- * no reactions. So each hit is re-fetched from history at its exact `ts` to get
- * the full record, falling back to the search hit if that read is not allowed.
- */
 async function backfillMentions(
   client: WebClient,
   authedUserId: string,
@@ -259,9 +212,6 @@ async function backfillMentions(
       if (!channelId || !ts) continue;
 
       if (rawChannel) {
-        // `ensure...FromReference`, not `upsert...`: `search.messages` omits
-        // `is_member`/`is_archived`/topic, so a plain upsert would overwrite
-        // what `conversations.list` already established with defaults.
         tally(
           stats.conversations,
           await ensureConversationFromReference(normalizeConversation(rawChannel)),
@@ -283,7 +233,6 @@ async function backfillMentions(
   );
 }
 
-/** One message by exact ts, or null if it cannot be read. */
 async function fetchSingleMessage(
   client: WebClient,
   conversationId: string,
@@ -303,7 +252,6 @@ async function fetchSingleMessage(
   }
 }
 
-/** Fetch replies for every thread parent we saw. */
 async function backfillThreads(
   client: WebClient,
   parents: Array<{ conversationId: string; ts: string }>,
@@ -324,8 +272,6 @@ async function backfillThreads(
         });
 
         for (const raw of page.messages ?? []) {
-          // The parent comes back in this list too; the upsert makes that a
-          // no-op refresh rather than a duplicate.
           await ingestOne(raw, parent.conversationId, stats);
           stats.threads.repliesFetched += 1;
         }
@@ -377,7 +323,6 @@ export async function runBackfill(
   await backfillUsers(client, stats, log);
   const conversations = await backfillConversationList(client, stats, log);
 
-  // DMs and group DMs only — see the scope note at the top of this file.
   const direct = conversations.filter(
     (conversation) =>
       conversation.kind === 'IM' || conversation.kind === 'MPIM',

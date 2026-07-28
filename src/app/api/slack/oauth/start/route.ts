@@ -45,7 +45,6 @@ export async function GET(): Promise<NextResponse> {
     value: state,
     httpOnly: true,
     sameSite: 'lax',
-    // Slack requires an https redirect URL, so the cookie can always be secure.
     secure: true,
     path: '/',
     maxAge: Math.floor(DEFAULT_STATE_TTL_MS / 1000),

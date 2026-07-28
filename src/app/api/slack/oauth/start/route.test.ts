@@ -43,14 +43,12 @@ describe('GET /api/slack/oauth/start', () => {
       'https://localhost:3000/api/slack/oauth/callback',
     );
 
-    // User-token flow: the scopes we care about ride on `user_scope`.
     const userScopes =
       location.searchParams.get('user_scope')?.split(',') ?? [];
     for (const scope of SLACK_USER_SCOPES) {
       expect(userScopes).toContain(scope);
     }
 
-    // Phase 1 additions beyond plan.md's stated minimum.
     expect(userScopes).toContain('channels:read');
     expect(userScopes).toContain('groups:read');
     expect(userScopes).toContain('mpim:read');

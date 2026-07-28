@@ -1,14 +1,3 @@
-/**
- * Turning Slack API failures into something a human can act on
- * (plan.md, Phase 8).
- *
- * Slack's error codes are terse strings like `not_in_channel` or `ratelimited`.
- * Surfacing those raw in the UI is barely better than a stack trace: the user
- * cannot tell whether they should retry, fix a permission, or give up.
- *
- * Pure and dependency-free so it can be unit tested without a client.
- */
-
 export type SlackFailureKind =
   | 'rate_limited'
   | 'permission'
@@ -19,15 +8,11 @@ export type SlackFailureKind =
 
 export type SlackFailure = {
   kind: SlackFailureKind;
-  /** What to show the user. Complete sentence, no error code jargon. */
   message: string;
-  /** Whether retrying the same call unchanged could plausibly work. */
   retryable: boolean;
-  /** Seconds Slack asked us to wait, when it said. */
   retryAfterSeconds?: number;
 };
 
-/** Slack sends the code in `data.error`, and sometimes only in the message. */
 function extractCode(error: unknown): string {
   if (typeof error === 'string') return error.toLowerCase();
 
@@ -70,13 +55,6 @@ function extractRetryAfter(error: unknown): number | undefined {
   return undefined;
 }
 
-/**
- * Classify a Slack failure.
- *
- * The default is `unknown` + retryable, deliberately. An unrecognised code is
- * more likely a transient server-side problem than a permanent one, and telling
- * the user "this will never work" when it might is the worse mistake.
- */
 export function describeSlackError(error: unknown): SlackFailure {
   const code = extractCode(error);
   const retryAfterSeconds = extractRetryAfter(error);

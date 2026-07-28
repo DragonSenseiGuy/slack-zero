@@ -1,20 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * Unit tests for the LLM client wrapper. The provider SDK is mocked — per
- * CLAUDE.md these must never hit the live Hack Club AI proxy.
- *
- * The truncation case is the one worth pinning down: the default model
- * (`qwen/qwen3-32b`) is a reasoning model, and the proxy returns its hidden
- * reasoning in a separate `message.reasoning` field. That keeps `content` clean
- * of `<think>` blocks, but reasoning still spends the `max_tokens` budget — so a
- * too-small budget yields `content: null` with `finish_reason: 'length'`.
- */
-
 const create = vi.fn();
 
 vi.mock('openai', () => {
-  // Mirrors the real constructor signature: (status, error, message, headers).
   class APIError extends Error {
     status?: number;
     constructor(status?: number, _error?: unknown, message?: string) {

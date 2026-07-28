@@ -2,15 +2,6 @@
 
 import { useEffect } from 'react';
 
-/**
- * Root error boundary (plan.md, Phase 8).
- *
- * Catches anything a route throws during render so a single bad row cannot
- * replace the whole app with a blank page. The message is shown rather than
- * hidden: this is a single-user local tool, the "user" is the person who can
- * fix it, and swallowing the reason would just mean opening devtools anyway.
- */
-
 export default function GlobalError({
   error,
   reset,
@@ -19,7 +10,6 @@ export default function GlobalError({
   reset: () => void;
 }) {
   useEffect(() => {
-    // Next has already logged this, but not with our framing.
     console.error('SlackZero crashed while rendering:', error);
   }, [error]);
 

@@ -88,7 +88,7 @@ function failure(
   return response;
 }
 
-/** Single-use cookie: burn it on the way out, success or failure. */
+/** Single-use cookie */
 function clearStateCookie(response: NextResponse): void {
   response.cookies.set({
     name: STATE_COOKIE_NAME,

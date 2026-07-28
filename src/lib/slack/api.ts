@@ -2,12 +2,6 @@ import { WebClient } from '@slack/web-api';
 
 import { getInstallation } from '@/lib/slack/installation';
 
-/**
- * Thin server-side wrappers over the Slack Web API.
- *
- * Tokens are read from the DB in here and never returned to callers.
- */
-
 export type SlackAuthCheck =
   | {
       status: 'ok';
@@ -19,12 +13,6 @@ export type SlackAuthCheck =
   | { status: 'not_configured' }
   | { status: 'error'; error: string };
 
-/**
- * Verify the stored user token with `auth.test`.
- *
- * Returns `not_configured` (not an error) when no installation exists yet —
- * that is the normal pre-OAuth state.
- */
 export async function checkSlackAuth(): Promise<SlackAuthCheck> {
   const installation = await getInstallation();
 
@@ -48,7 +36,6 @@ export async function checkSlackAuth(): Promise<SlackAuthCheck> {
       url: typeof result.url === 'string' ? result.url : undefined,
     };
   } catch (error) {
-    // Deliberately terse: never let a token or full request dump into logs.
     const data =
       typeof error === 'object' && error !== null
         ? (error as { data?: { error?: unknown } }).data

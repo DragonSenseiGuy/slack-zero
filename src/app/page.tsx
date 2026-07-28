@@ -8,12 +8,6 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-/**
- * Phase 0 home page. Deliberately plain — Phase 2 owns the real UI.
- *
- * Server component: the installation is loaded server-side and only the
- * token-free `PublicInstallation` shape is rendered.
- */
 export default async function HomePage({
   searchParams,
 }: {

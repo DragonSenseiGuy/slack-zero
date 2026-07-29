@@ -47,6 +47,14 @@ vi.mock('@/lib/reply/send', async () => {
 });
 
 vi.mock('@/lib/env', () => ({ isLlmConfigured: () => false }));
+
+// The authorization boundary is exercised in its own describe block below;
+// every other test here runs as the signed-in owner.
+const requireOwnerSession = vi.fn();
+vi.mock('@/lib/auth/require', () => ({
+  requireOwnerSession: () => requireOwnerSession(),
+  UnauthorizedError: class UnauthorizedError extends Error {},
+}));
 vi.mock('@/lib/reply/generate', () => ({ generateDrafts: vi.fn() }));
 vi.mock('@/lib/slack/installation', () => ({ getInstallation: vi.fn() }));
 
@@ -68,6 +76,10 @@ beforeEach(() => {
   messageStateUpsert.mockReset();
   messageFindUnique.mockReset();
   revalidatePath.mockReset();
+  requireOwnerSession.mockReset().mockResolvedValue({
+    teamId: 'T1',
+    userId: 'U1',
+  });
   messageFindUnique.mockResolvedValue(MESSAGE);
 });
 
@@ -270,5 +282,25 @@ describe('draftReplies', () => {
   it('refuses a missing message id', async () => {
     const result = await draftReplies('');
     expect(result.ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Authorization
+// ---------------------------------------------------------------------------
+
+describe('reply actions when the caller is not the owner', () => {
+  beforeEach(() => {
+    requireOwnerSession.mockRejectedValue(new Error('Not signed in'));
+  });
+
+  it('refuses to send and never reaches Slack', async () => {
+    await expect(sendReplyToMessage('m1', 'On it.')).rejects.toThrow();
+    expect(sendReply).not.toHaveBeenCalled();
+    expect(messageFindUnique).not.toHaveBeenCalled();
+  });
+
+  it('refuses to draft', async () => {
+    await expect(draftReplies('m1')).rejects.toThrow();
   });
 });

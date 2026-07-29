@@ -27,8 +27,15 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? 'github' : 'list',
+  /**
+   * Mints the owner's session cookie once, up front. Since the auth phase,
+   * every page but `/` redirects an anonymous visitor to the connect screen,
+   * and the suite cannot complete a real Slack OAuth round-trip.
+   */
+  globalSetup: './e2e/fixtures/auth.ts',
   use: {
     baseURL: BASE_URL,
+    storageState: './e2e/.auth/owner.json',
     trace: 'on-first-retry',
   },
   projects: [

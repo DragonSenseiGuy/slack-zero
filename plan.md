@@ -1201,6 +1201,65 @@ triage state in Postgres.
 
 ---
 
+## Phase 10: Authentication and ownership
+**Status:** Done
+
+**Why this exists (not in the original plan).** Phases 0-9 assumed the app only
+ever ran on `localhost`, so `plan.md` said "No multi-tenant auth system needed
+yet" and CLAUDE.md listed auth under things to avoid. That assumption stopped
+holding at commit `7eb0dd2`, which added a production Docker image. Nothing in
+that transition added a gate, so every route — `/inbox`, `/stats`, `/health`,
+both data APIs, and all four server-action modules — served the owner's Slack
+data and would send DMs with the owner's user token for *any* caller. Raised by
+the user, 2026-07-29; scope agreed before implementing.
+
+Identity was the second half of the bug. `getInstallation()` resolved "who we
+are" as `findFirst({ orderBy: { updatedAt: 'desc' } })` — the most recently
+updated row — so `/api/slack/oauth/start` doubled as a takeover: anyone could
+authorize and inherit the app.
+
+**What was built**
+- Slack OAuth *is* the login. Completing the round-trip as the owner sets a
+  signed, httpOnly session cookie (`src/lib/auth/session.ts`); there is no
+  separate password. HMAC via Web Crypto so `src/middleware.ts` can import it.
+- An explicit owner: `SLACK_OWNER_USER_ID`, falling back to trust-on-first-use.
+  `saveInstallation()` throws `NotTheOwnerError` for anyone else, and
+  `getInstallation()` resolves the owner rather than the newest row.
+- `src/middleware.ts` turns anonymous requests away. Deliberately a *presence*
+  check only: Next inlines `process.env` into the edge bundle at build time,
+  and this app is built in Docker with placeholder secrets, so a signature
+  check there would verify against an empty key and lock the owner out.
+- The authoritative check is `requireOwnerSession()` / `requireOwnerPage()`
+  (`src/lib/auth/require.ts`), called in the Node runtime by every page, both
+  data routes, and every user-facing server action. It re-checks ownership
+  against the database, so an old cookie cannot outlive an owner change.
+- `/api/health` stays public for container probes but returns a redacted report
+  when signed out — the full one names the Slack user and workspace and echoes
+  raw database errors.
+- Snooze sweeps are left unguarded on purpose: `scripts/snooze-sweep.ts` runs
+  them outside any request, where `cookies()` does not exist. They mutate only
+  our own triage state and return nothing to a caller.
+
+**Verification (2026-07-29)**
+- `npm run test` → 652 tests / 32 files passed, including new coverage for
+  session forge/tamper/expiry/domain-separation, non-owner OAuth rejection, and
+  reply actions refusing an unauthenticated caller.
+- `npm run test:e2e` → 53 passed / 1 opt-in live-send test skipped, with the
+  same timing-sensitive `context.spec.ts` case flaking that Phase 9 recorded;
+  a focused rerun passed 3/3. `npm run lint` clean. The suite
+  now signs itself in through a Playwright `globalSetup` that mints a real
+  session cookie (`e2e/fixtures/auth.ts`); `e2e/auth.spec.ts` runs with empty
+  storage state and asserts the gate from outside.
+- `npx tsc --noEmit` and `npm run build` pass.
+
+**Open item for the user, not fixed here.** This database holds two
+`SlackInstallation` rows from Phase 0, when a second person in the workspace
+authorized the app during setup (`U0BEHBXNGHK`, alongside the owner
+`U0BK9FR4Y1M`). Trust-on-first-use picked the wrong one, which is why
+`SLACK_OWNER_USER_ID` is now set in `.env`. The stray row still holds that
+person's encrypted user token and should probably be deleted — left alone
+because deleting someone's credentials is the user's call.
+
 ## Done Criteria for the Overall Project
 All 8 phases marked `Done`, full test suite green, and a working app that can
 OAuth into a real Slack workspace, ingest DMs/mentions, classify and sort

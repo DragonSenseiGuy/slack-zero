@@ -1,11 +1,15 @@
 import Link from 'next/link';
 
+import { requireOwnerPage } from '@/lib/auth/require';
 import { getHealth, type Check, type CheckStatus } from '@/lib/health';
 
 export const dynamic = 'force-dynamic';
 
 /** Plain server-rendered view of the same report /api/health returns. */
 export default async function HealthPage() {
+  // Owner-only: unlike /api/health this always renders the unredacted detail.
+  await requireOwnerPage();
+
   const report = await getHealth();
 
   const rows: Array<[string, Check]> = [

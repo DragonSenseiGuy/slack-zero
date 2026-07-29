@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 
+import { requireOwnerSession } from '@/lib/auth/require';
 import { prisma } from '@/lib/db';
 import {
   BUILT_IN_VIEWS,
@@ -82,6 +83,8 @@ const SELECT = {
  * since edited is never overwritten.
  */
 export async function listViews(): Promise<SavedView[]> {
+  await requireOwnerSession();
+
   const existing = await prisma.viewDefinition.findMany({
     select: SELECT,
     orderBy: [{ position: 'asc' }, { name: 'asc' }],
@@ -162,6 +165,8 @@ export async function createView(input: {
   sort: ViewSort;
   filters: ViewFilters;
 }): Promise<ViewMutationResult> {
+  await requireOwnerSession();
+
   const invalid = validate(input);
   if (invalid) return { ok: false, error: invalid };
 
@@ -203,6 +208,8 @@ export async function updateView(
     filters: ViewFilters;
   },
 ): Promise<ViewMutationResult> {
+  await requireOwnerSession();
+
   if (!id) return { ok: false, error: 'A view id is required.' };
 
   const invalid = validate(input);
@@ -239,6 +246,8 @@ export async function updateView(
  * undo itself.
  */
 export async function deleteView(id: string): Promise<ViewDeleteResult> {
+  await requireOwnerSession();
+
   if (!id) return { ok: false, error: 'A view id is required.' };
 
   try {
@@ -269,6 +278,8 @@ export async function setUserVip(
   userId: string,
   isVip: boolean,
 ): Promise<{ ok: true; userId: string; isVip: boolean } | { ok: false; error: string }> {
+  await requireOwnerSession();
+
   if (!userId) return { ok: false, error: 'A user id is required.' };
 
   try {

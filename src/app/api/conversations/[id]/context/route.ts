@@ -1,3 +1,4 @@
+import { getOwnerSession } from '@/lib/auth/require';
 import {
   InvalidContextRequestError,
   parseContextRequest,
@@ -21,6 +22,11 @@ export async function GET(
   request: Request,
   { params }: { params: { id: string } },
 ): Promise<Response> {
+  // This route reads Slack history on demand with the owner's token.
+  if (!(await getOwnerSession())) {
+    return Response.json({ error: 'unauthorized' }, { status: 401 });
+  }
+
   const url = new URL(request.url);
 
   let parsed;

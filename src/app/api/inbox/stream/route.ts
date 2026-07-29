@@ -1,3 +1,4 @@
+import { getOwnerSession } from '@/lib/auth/require';
 import { queueRevision } from '@/lib/queue/revision';
 import { runSnoozeSweeps } from '@/lib/snooze/actions';
 
@@ -28,6 +29,13 @@ const POLL_MS = 2_000;
 const HEARTBEAT_MS = 25_000;
 
 export async function GET(request: Request): Promise<Response> {
+  // Checked once at subscribe time. A long-lived stream outliving a sign-out
+  // is acceptable: the payload is only a revision string, and the refresh it
+  // triggers re-renders the page through `requireOwnerPage()`.
+  if (!(await getOwnerSession())) {
+    return Response.json({ error: 'unauthorized' }, { status: 401 });
+  }
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({

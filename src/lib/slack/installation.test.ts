@@ -3,15 +3,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   decryptInstallation,
+  NotTheOwnerError,
   saveInstallation,
   toPublicInstallation,
 } from '@/lib/slack/installation';
 import { decryptSlackToken } from '@/lib/slack/token-crypto';
 
-const { upsert } = vi.hoisted(() => ({ upsert: vi.fn() }));
+const { upsert, findFirst } = vi.hoisted(() => ({
+  upsert: vi.fn(),
+  // Owner resolution reads the earliest installation before any write.
+  findFirst: vi.fn(),
+}));
 
 vi.mock('@/lib/db', () => ({
-  prisma: { slackInstallation: { upsert } },
+  prisma: { slackInstallation: { upsert, findFirst } },
 }));
 
 const installation: SlackInstallation = {
@@ -29,6 +34,9 @@ describe('Slack installation token privacy', () => {
   beforeEach(() => {
     process.env.SLACK_TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
     upsert.mockReset().mockResolvedValue(installation);
+    // No prior installation: trust on first use, so the write is allowed.
+    findFirst.mockReset().mockResolvedValue(null);
+    delete process.env.SLACK_OWNER_USER_ID;
   });
 
   afterEach(() => delete process.env.SLACK_TOKEN_ENCRYPTION_KEY);
@@ -102,5 +110,50 @@ describe('Slack installation token privacy', () => {
     expect(publicInstallation).not.toHaveProperty('botAccessToken');
     expect(publicInstallation).not.toHaveProperty('encryptedUserAccessToken');
     expect(publicInstallation).not.toHaveProperty('encryptedBotAccessToken');
+  });
+});
+
+describe('installation ownership', () => {
+  beforeEach(() => {
+    process.env.SLACK_TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
+    upsert.mockReset().mockResolvedValue(installation);
+    findFirst.mockReset().mockResolvedValue(null);
+    delete process.env.SLACK_OWNER_USER_ID;
+  });
+
+  afterEach(() => {
+    delete process.env.SLACK_TOKEN_ENCRYPTION_KEY;
+    delete process.env.SLACK_OWNER_USER_ID;
+  });
+
+  const input = {
+    teamId: 'T-SYNTHETIC',
+    teamName: 'Synthetic Workspace',
+    authedUserId: 'U-INTRUDER',
+    userAccessToken: 'xoxp-intruder',
+    botAccessToken: null,
+    scopes: 'channels:history',
+  };
+
+  it('refuses to store a token for anyone but the configured owner', async () => {
+    process.env.SLACK_OWNER_USER_ID = 'U-SYNTHETIC';
+
+    await expect(saveInstallation(input)).rejects.toBeInstanceOf(NotTheOwnerError);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('refuses a second Slack user once one has installed', async () => {
+    findFirst.mockResolvedValue(installation);
+
+    await expect(saveInstallation(input)).rejects.toBeInstanceOf(NotTheOwnerError);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it('allows the owner to reconnect', async () => {
+    process.env.SLACK_OWNER_USER_ID = 'U-SYNTHETIC';
+    findFirst.mockResolvedValue(installation);
+
+    await saveInstallation({ ...input, authedUserId: 'U-SYNTHETIC' });
+    expect(upsert).toHaveBeenCalledTimes(1);
   });
 });

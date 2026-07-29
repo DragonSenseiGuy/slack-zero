@@ -43,6 +43,28 @@ export async function getHealth(): Promise<HealthReport> {
   return { ok, checkedAt: new Date().toISOString(), checks };
 }
 
+/**
+ * The same report with every `detail` and timing dropped.
+ *
+ * `/api/health` has to stay reachable signed out — it is the container's
+ * liveness probe — but the full report names the authenticated Slack user and
+ * workspace and echoes raw database errors. An anonymous caller gets the
+ * statuses and nothing else.
+ */
+export function redactHealth(report: HealthReport): HealthReport {
+  const strip = (check: Check): Check => ({ status: check.status });
+
+  return {
+    ok: report.ok,
+    checkedAt: report.checkedAt,
+    checks: {
+      db: strip(report.checks.db),
+      slack: strip(report.checks.slack),
+      llm: strip(report.checks.llm),
+    },
+  };
+}
+
 async function checkDb(): Promise<Check> {
   const startedAt = Date.now();
   try {

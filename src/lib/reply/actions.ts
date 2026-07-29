@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 
+import { requireOwnerSession } from '@/lib/auth/require';
 import { prisma } from '@/lib/db';
 import { isLlmConfigured } from '@/lib/env';
 import { renderSlackText } from '@/lib/queue/text';
@@ -35,6 +36,8 @@ export async function sendReplyToMessage(
     alsoMarkDone?: readonly string[];
   } = {},
 ): Promise<SendReplyResult> {
+  await requireOwnerSession();
+
   if (!messageId) return { ok: false, error: 'A message id is required.' };
   if (text.trim() === '') return { ok: false, error: 'A reply needs some text.' };
 
@@ -109,6 +112,8 @@ export async function sendReplyToMessage(
 export async function draftReplies(
   messageId: string,
 ): Promise<DraftRepliesResult> {
+  await requireOwnerSession();
+
   if (!messageId) return { ok: false, error: 'A message id is required.' };
 
   try {

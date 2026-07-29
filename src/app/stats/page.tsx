@@ -1,5 +1,6 @@
 import Link from 'next/link';
 
+import { requireOwnerPage } from '@/lib/auth/require';
 import { loadStats } from '@/lib/stats/load';
 import {
   formatDuration,
@@ -135,6 +136,8 @@ function Sparkline({ series }: { series: DailyPoint[] }) {
 }
 
 export default async function StatsPage() {
+  await requireOwnerPage();
+
   let stats;
   try {
     stats = await loadStats();

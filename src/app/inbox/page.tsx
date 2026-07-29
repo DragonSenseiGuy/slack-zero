@@ -1,5 +1,6 @@
 import Link from 'next/link';
 
+import { requireOwnerPage } from '@/lib/auth/require';
 import { loadInbox, resolveConversationScope } from '@/lib/queue/load';
 import { runSnoozeSweeps } from '@/lib/snooze/actions';
 import { listViews } from '@/lib/views/actions';
@@ -18,6 +19,8 @@ export default async function InboxPage({
 }: {
   searchParams?: { in?: string };
 }) {
+  await requireOwnerPage();
+
   try {
     await runSnoozeSweeps();
   } catch {

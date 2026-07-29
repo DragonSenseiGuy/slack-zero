@@ -1,5 +1,6 @@
 import Link from 'next/link';
 
+import { getOwnerSession } from '@/lib/auth/require';
 import { isSlackConfigured } from '@/lib/env';
 import {
   getPublicInstallation,
@@ -8,6 +9,11 @@ import {
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Setup, status, and — since there is no separate login screen — the sign-in
+ * page. Signing in *is* completing Slack OAuth as the owner, so this is the one
+ * page that must stay reachable while signed out.
+ */
 export default async function HomePage({
   searchParams,
 }: {
@@ -15,15 +21,22 @@ export default async function HomePage({
     slack_error?: string;
     slack_connected?: string;
     backfill_error?: string;
+    signed_out?: string;
   };
 }) {
+  const session = await getOwnerSession();
+
   let installation: PublicInstallation | null = null;
   let dbError = false;
 
-  try {
-    installation = await getPublicInstallation();
-  } catch {
-    dbError = true;
+  // Workspace details belong to the owner. Signed out, this page says only
+  // whether Slack is configured and offers the connect button.
+  if (session) {
+    try {
+      installation = await getPublicInstallation();
+    } catch {
+      dbError = true;
+    }
   }
 
   const configured = isSlackConfigured();
@@ -38,16 +51,43 @@ export default async function HomePage({
         </p>
       </header>
 
-      <p>
-        <Link
-          className="inline-block rounded bg-neutral-900 px-4 py-2 text-sm font-medium text-white"
-          href="/inbox"
-        >
-          Open inbox →
-        </Link>
-      </p>
+      {session ? (
+        <p className="flex items-center gap-3">
+          <Link
+            className="inline-block rounded bg-neutral-900 px-4 py-2 text-sm font-medium text-white"
+            href="/inbox"
+          >
+            Open inbox →
+          </Link>
+          <form action="/api/auth/signout" method="post">
+            <button
+              className="rounded border border-neutral-300 px-3 py-2 text-sm"
+              type="submit"
+            >
+              Sign out
+            </button>
+          </form>
+        </p>
+      ) : (
+        <p className="rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700">
+          Signed out. Connect Slack below to sign in — only{' '}
+          <code>SLACK_OWNER_USER_ID</code> (or, if that is unset, the Slack user
+          who connected first) can open the inbox.
+        </p>
+      )}
 
-      {searchParams.slack_error ? (
+      {searchParams.signed_out ? (
+        <p className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          You need to sign in with Slack to view that page.
+        </p>
+      ) : null}
+
+      {searchParams.slack_error === 'not_the_owner' ? (
+        <p className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+          That Slack account does not own this SlackZero install, so it was not
+          connected. Sign in as the owner instead.
+        </p>
+      ) : searchParams.slack_error ? (
         <p className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">
           Slack connection failed: <code>{searchParams.slack_error}</code>
         </p>
@@ -102,7 +142,11 @@ export default async function HomePage({
             <dd>{installation.installedAt}</dd>
           </dl>
         ) : (
-          <p className="mb-3 text-sm text-neutral-600">Not connected yet.</p>
+          <p className="mb-3 text-sm text-neutral-600">
+            {session
+              ? 'Not connected yet.'
+              : 'Sign in to see the connected workspace.'}
+          </p>
         )}
 
         <p className="mt-4">

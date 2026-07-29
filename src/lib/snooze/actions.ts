@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 
+import { requireOwnerSession } from '@/lib/auth/require';
 import { prisma } from '@/lib/db';
 import {
   InvalidSnoozeTimeError,
@@ -52,6 +53,8 @@ export async function snoozeMessages(
   messageIds: readonly string[],
   input: { preset: SnoozePreset; customIso?: string },
 ): Promise<SnoozeResult> {
+  await requireOwnerSession();
+
   const ids = [...new Set(messageIds.filter((id) => id !== ''))];
   if (ids.length === 0) return { ok: false, error: 'A message id is required.' };
 
@@ -129,6 +132,8 @@ export async function snoozeMessages(
 export async function unsnoozeMessage(
   messageId: string,
 ): Promise<UnsnoozeResult> {
+  await requireOwnerSession();
+
   if (!messageId) return { ok: false, error: 'A message id is required.' };
 
   try {

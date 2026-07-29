@@ -47,6 +47,10 @@ const envSchema = z.object({
   ),
   SLACK_TOKEN_ENCRYPTION_KEY: optionalString,
   APP_BASE_URL: optionalStringWithDefault('https://localhost:3000'),
+  // Slack user id allowed to sign in and act with the stored token. Optional
+  // so a fresh local install still works (first connector becomes the owner),
+  // but it should be set on anything network-reachable.
+  SLACK_OWNER_USER_ID: optionalString,
 
   // --- LLM: Hack Club AI (OpenAI-compatible proxy) ---------------------
   HACKCLUB_AI_BASE_URL: optionalStringWithDefault(
@@ -91,6 +95,20 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
 }
 
 let cached: Env | undefined;
+
+/**
+ * The configured owner's Slack user id, or undefined.
+ *
+ * Read straight from `process.env` rather than through `getEnv()` on purpose:
+ * owner resolution sits underneath `saveInstallation()`, which is unit tested
+ * with a mocked Prisma client and no `DATABASE_URL`. Validating the whole
+ * schema there would make an unrelated required variable a precondition for
+ * storing a token.
+ */
+export function getOwnerUserId(): string | undefined {
+  const value = process.env.SLACK_OWNER_USER_ID?.trim();
+  return value ? value : undefined;
+}
 
 /** Validated environment, parsed once per process. */
 export function getEnv(): Env {

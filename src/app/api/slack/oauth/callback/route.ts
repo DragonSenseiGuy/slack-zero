@@ -1,8 +1,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import {
+  createSession,
+  DEFAULT_SESSION_TTL_MS,
+  SESSION_COOKIE_NAME,
+} from '@/lib/auth/session';
 import { EnvValidationError, requireSlackEnv } from '@/lib/env';
 import { runBackfill } from '@/lib/slack/backfill';
-import { saveInstallation } from '@/lib/slack/installation';
+import { NotTheOwnerError, saveInstallation } from '@/lib/slack/installation';
 import { exchangeCodeForToken } from '@/lib/slack/oauth';
 import {
   STATE_COOKIE_NAME,
@@ -65,7 +70,19 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return failure(request, exchange.error, slack.appBaseUrl);
   }
 
-  await saveInstallation(exchange.installation);
+  try {
+    await saveInstallation(exchange.installation);
+  } catch (error) {
+    if (error instanceof NotTheOwnerError) {
+      // Someone else in the workspace completed the flow. Their token is not
+      // stored and no session is issued, so this is a dead end for them.
+      console.warn(
+        `Rejected Slack OAuth from non-owner ${error.attemptedUserId}.`,
+      );
+      return failure(request, 'not_the_owner', slack.appBaseUrl);
+    }
+    throw error;
+  }
 
   let backfillFailed = false;
   try {
@@ -87,6 +104,25 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     resolveUrl(request, query, slack.appBaseUrl),
   );
   clearStateCookie(response);
+
+  // Completing OAuth as the owner is what signs you in — there is no separate
+  // password. Slack's own login is the authentication step.
+  response.cookies.set({
+    name: SESSION_COOKIE_NAME,
+    value: await createSession(
+      {
+        teamId: exchange.installation.teamId,
+        userId: exchange.installation.authedUserId,
+      },
+      slack.stateSecret,
+    ),
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: true,
+    path: '/',
+    maxAge: Math.floor(DEFAULT_SESSION_TTL_MS / 1000),
+  });
+
   return response;
 }
 

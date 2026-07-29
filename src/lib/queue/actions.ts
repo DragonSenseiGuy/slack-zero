@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 
+import { requireOwnerSession } from '@/lib/auth/require';
 import { prisma } from '@/lib/db';
 
 export type SetDoneResult =
@@ -24,6 +25,8 @@ export async function setMessagesDone(
   messageIds: readonly string[],
   isDone: boolean,
 ): Promise<SetDoneResult> {
+  await requireOwnerSession();
+
   const ids = [...new Set(messageIds.filter((id) => id !== ''))];
 
   if (ids.length === 0) {

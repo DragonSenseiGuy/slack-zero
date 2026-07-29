@@ -133,6 +133,7 @@ async function backfillConversationList(
 async function backfillHistory(
   client: WebClient,
   conversationId: string,
+  authedUserId: string,
   stats: BackfillStats,
   options: BackfillOptions,
 ): Promise<RawSlackMessage[]> {
@@ -152,7 +153,7 @@ async function backfillHistory(
 
       for (const raw of page.messages ?? []) {
         collected.push(raw);
-        await ingestOne(raw, conversationId, stats);
+        await ingestOne(raw, conversationId, stats, authedUserId);
       }
 
       cursor = page.response_metadata?.next_cursor || undefined;
@@ -174,10 +175,11 @@ async function ingestOne(
   raw: RawSlackMessage,
   conversationId: string,
   stats: BackfillStats,
+  authedUserId: string,
 ): Promise<void> {
   try {
     const message = normalizeMessage(raw, conversationId);
-    tally(stats.messages, await upsertMessage(message, 'BACKFILL'));
+    tally(stats.messages, await upsertMessage(message, 'BACKFILL', authedUserId));
   } catch (error) {
     if (error instanceof NormalizationError) {
       stats.messages.skipped += 1;
@@ -219,7 +221,7 @@ async function backfillMentions(
       }
 
       const full = await fetchSingleMessage(client, channelId, ts);
-      await ingestOne(full ?? (match as RawSlackMessage), channelId, stats);
+      await ingestOne(full ?? (match as RawSlackMessage), channelId, stats, authedUserId);
       stats.mentions.ingested += 1;
     }
 
@@ -256,6 +258,7 @@ async function backfillThreads(
   client: WebClient,
   parents: Array<{ conversationId: string; ts: string }>,
   stats: BackfillStats,
+  authedUserId: string,
   log: (message: string) => void,
 ): Promise<void> {
   for (const parent of parents) {
@@ -272,7 +275,7 @@ async function backfillThreads(
         });
 
         for (const raw of page.messages ?? []) {
-          await ingestOne(raw, parent.conversationId, stats);
+          await ingestOne(raw, parent.conversationId, stats, authedUserId);
           stats.threads.repliesFetched += 1;
         }
 
@@ -334,6 +337,7 @@ export async function runBackfill(
     const messages = await backfillHistory(
       client,
       conversation.id,
+      authedUserId,
       stats,
       options,
     );
@@ -354,7 +358,7 @@ export async function runBackfill(
   }
 
   if (options.includeThreads !== false) {
-    await backfillThreads(client, threadParents, stats, log);
+    await backfillThreads(client, threadParents, stats, authedUserId, log);
   }
 
   const finishedAt = new Date();

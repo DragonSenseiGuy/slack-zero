@@ -17,6 +17,7 @@
     "db:down": "docker compose down",
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
+    "db:privacy-prepare": "tsx scripts/privacy-pre-migration.ts",
     "backfill": "tsx scripts/backfill.ts",
     "backfill:verify": "tsx scripts/verify-backfill.ts",
     "classify": "tsx scripts/classify.ts",

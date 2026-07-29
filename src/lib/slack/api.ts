@@ -1,6 +1,4 @@
-import { WebClient } from '@slack/web-api';
-
-import { getInstallation } from '@/lib/slack/installation';
+import { getSlackContext } from '@/lib/slack/client';
 
 export type SlackAuthCheck =
   | {
@@ -14,15 +12,15 @@ export type SlackAuthCheck =
   | { status: 'error'; error: string };
 
 export async function checkSlackAuth(): Promise<SlackAuthCheck> {
-  const installation = await getInstallation();
-
-  if (!installation) {
+  let context;
+  try {
+    context = await getSlackContext();
+  } catch {
     return { status: 'not_configured' };
   }
 
   try {
-    const client = new WebClient(installation.userAccessToken);
-    const result = await client.auth.test();
+    const result = await context.client.auth.test();
 
     if (!result.ok) {
       return { status: 'error', error: String(result.error ?? 'auth_failed') };
@@ -30,9 +28,9 @@ export async function checkSlackAuth(): Promise<SlackAuthCheck> {
 
     return {
       status: 'ok',
-      teamId: String(result.team_id ?? installation.teamId),
-      teamName: String(result.team ?? installation.teamName),
-      userId: String(result.user_id ?? installation.authedUserId),
+      teamId: String(result.team_id ?? context.teamId),
+      teamName: String(result.team ?? context.teamName),
+      userId: String(result.user_id ?? context.authedUserId),
       url: typeof result.url === 'string' ? result.url : undefined,
     };
   } catch (error) {

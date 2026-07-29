@@ -137,7 +137,6 @@ describe('replyTargetThreadTs', () => {
       replyTargetThreadTs({
         ...base,
         threadTs: '1784994500.000100',
-        isThreadReply: true,
       }),
     ).toBe('1784994500.000100');
   });
@@ -145,7 +144,7 @@ describe('replyTargetThreadTs', () => {
   it('replies into the thread of a thread parent, not the channel', () => {
     // Answering in the channel when the conversation has visibly moved into a
     // thread reads as a mistake to everyone watching.
-    expect(replyTargetThreadTs({ ...base, isThreadParent: true })).toBe(base.ts);
+    expect(replyTargetThreadTs({ ...base, threadTs: base.ts })).toBe(base.ts);
   });
 
   it('prefers an explicit threadTs over the parent heuristic', () => {
@@ -153,7 +152,6 @@ describe('replyTargetThreadTs', () => {
       replyTargetThreadTs({
         ...base,
         threadTs: '1784994400.000100',
-        isThreadParent: true,
       }),
     ).toBe('1784994400.000100');
   });

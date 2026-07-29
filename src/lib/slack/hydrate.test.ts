@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { hydrateStubUsers, resetHydrationAttempts } from '@/lib/slack/hydrate';
+import { slackUserCache } from '@/lib/slack/cache';
 
 /**
  * `hydrate.ts` is the fix for raw `U0…` ids showing up as sender names: a
@@ -10,14 +11,6 @@ import { hydrateStubUsers, resetHydrationAttempts } from '@/lib/slack/hydrate';
  * Prisma and `upsertUser` are stubbed so this stays a pure unit test with no
  * database (CLAUDE.md). `vi.mock` is hoisted above the imports.
  */
-
-const findMany = vi.fn();
-const upsertUser = vi.fn();
-
-vi.mock('@/lib/db', () => ({ prisma: { user: { findMany: (...a: unknown[]) => findMany(...a) } } }));
-vi.mock('@/lib/slack/ingest', () => ({
-  upsertUser: (...a: unknown[]) => upsertUser(...a),
-}));
 
 function clientReturning(user: unknown) {
   const info = vi.fn().mockResolvedValue({ ok: true, user });
@@ -29,12 +22,10 @@ function clientReturning(user: unknown) {
 describe('hydrateStubUsers', () => {
   beforeEach(() => {
     resetHydrationAttempts();
-    findMany.mockReset();
-    upsertUser.mockReset();
+    slackUserCache.clear();
   });
 
-  it('resolves a stub row and stores the profile', async () => {
-    findMany.mockResolvedValue([{ id: 'U0BKUQN94AZ' }]);
+  it('resolves a stub row and caches the profile in memory', async () => {
     const { info, client } = clientReturning({
       id: 'U0BKUQN94AZ',
       name: 'ada',
@@ -45,14 +36,12 @@ describe('hydrateStubUsers', () => {
 
     expect(filled).toBe(1);
     expect(info).toHaveBeenCalledWith({ user: 'U0BKUQN94AZ' });
-    expect(upsertUser).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'U0BKUQN94AZ', displayName: 'ada' }),
-    );
+    expect(slackUserCache.get('U0BKUQN94AZ')).toMatchObject({ id: 'U0BKUQN94AZ' });
   });
 
   it('leaves users that already have a name alone', async () => {
     // A non-stub id is filtered out by the query, so nothing comes back.
-    findMany.mockResolvedValue([]);
+    slackUserCache.set('U1', { id: 'U1', name: 'cached' });
     const { info, client } = clientReturning({ id: 'U1' });
 
     expect(await hydrateStubUsers(['U1'], { client })).toBe(0);
@@ -60,7 +49,6 @@ describe('hydrateStubUsers', () => {
   });
 
   it('only calls users.info once per id, even if the user keeps talking', async () => {
-    findMany.mockResolvedValue([{ id: 'U2' }]);
     const { info, client } = clientReturning({ id: 'U2', name: 'bob' });
 
     await hydrateStubUsers(['U2'], { client });
@@ -70,7 +58,6 @@ describe('hydrateStubUsers', () => {
   });
 
   it('swallows a Slack error so ingestion is never blocked', async () => {
-    findMany.mockResolvedValue([{ id: 'U3' }]);
     const info = vi.fn().mockRejectedValue(
       Object.assign(new Error('slack'), { data: { error: 'user_not_found' } }),
     );
@@ -87,6 +74,5 @@ describe('hydrateStubUsers', () => {
 
   it('does nothing when given no ids', async () => {
     expect(await hydrateStubUsers([])).toBe(0);
-    expect(findMany).not.toHaveBeenCalled();
   });
 });

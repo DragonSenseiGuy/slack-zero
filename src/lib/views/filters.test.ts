@@ -34,7 +34,7 @@ function triage(overrides: Partial<MessageTriage> = {}): MessageTriage {
     category: 'action_needed' as TriageCategory,
     isBump: false,
     bumpOfMessageId: null,
-    reason: 'asks you to do a thing',
+    reasonCode: 'DIRECT_REQUEST',
     model: 'qwen/qwen3-32b',
     classifiedAtIso: '2026-07-26T12:00:00.000Z',
     ...overrides,

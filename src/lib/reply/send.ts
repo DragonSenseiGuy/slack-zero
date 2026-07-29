@@ -61,11 +61,8 @@ export async function sendReply(input: SendReplyInput): Promise<SentReply> {
 
 export function replyTargetThreadTs(message: {
   threadTs: string | null;
-  isThreadReply: boolean;
-  isThreadParent: boolean;
   ts: string;
 }): string | null {
   if (message.threadTs) return message.threadTs;
-  if (message.isThreadParent) return message.ts;
   return null;
 }

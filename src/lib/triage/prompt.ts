@@ -46,6 +46,8 @@ export type ClassificationContext = {
   sentAtIso: string;
   /** Explicit clock, so a fixture test is reproducible. */
   nowIso: string;
+  /** Optimistic concurrency token; never included in the model prompt. */
+  sourceUpdatedAtIso?: string;
   /**
    * Earlier messages from the same sender in the same conversation/thread,
    * oldest first. This is the only thing that makes bump detection possible:
@@ -74,7 +76,7 @@ export const CLASSIFICATION_MAX_TOKENS = 1200;
 export const CLASSIFICATION_SYSTEM_PROMPT = `You triage Slack messages for one person ("the reader"). You are given a single message and you reply with one JSON object and nothing else.
 
 Reply with exactly these keys:
-{"category": "action_needed" | "misc" | "fyi", "urgency_score": <integer 0-100>, "is_bump": <true|false>, "bump_of": <integer or null>, "reason": "<short sentence>"}
+{"category": "action_needed" | "misc" | "fyi", "urgency_score": <integer 0-100>, "is_bump": <true|false>, "bump_of": <integer or null>, "reason_code": "DIRECT_REQUEST" | "QUESTION" | "APPROVAL_NEEDED" | "BLOCKED" | "DEADLINE" | "INCIDENT" | "FOLLOW_UP" | "INFORMATIONAL" | "AUTOMATED_NOTICE" | "SOCIAL" | "OTHER"}
 
 CATEGORY — apply these rules in order and stop at the first one that matches:
 1. The message asks the reader a question, requests something of them, needs a
@@ -109,9 +111,8 @@ When is_bump is true and one of the numbered PREVIOUS MESSAGES is the original
 ask, set "bump_of" to that number. Otherwise set "bump_of" to null.
 When is_bump is false, "bump_of" must be null.
 
-REASON — one sentence, under 20 words, naming the specific evidence you used.
-It is shown to the reader, so it must be concrete ("asks you to review the PR
-by Friday"), not generic ("seems important").`;
+REASON_CODE — choose exactly one of the closed values above. Never quote or
+summarize message content.`;
 
 function describeChannel(context: ClassificationContext): string {
   if (context.isDirectMessage) {
@@ -172,12 +173,10 @@ function collapse(text: string): string {
 // ---------------------------------------------------------------------------
 
 export class ClassificationParseError extends Error {
-  readonly raw: string;
-
-  constructor(message: string, raw: string) {
+  constructor(message: string, raw?: string) {
     super(message);
+    void raw;
     this.name = 'ClassificationParseError';
-    this.raw = raw;
   }
 }
 
@@ -186,8 +185,11 @@ export type ParsedClassification = {
   category: TriageCategory;
   isBump: boolean;
   bumpOfMessageId: string | null;
-  reason: string;
+  reasonCode: ClassificationReasonCode;
 };
+
+export const CLASSIFICATION_REASON_CODES = ['DIRECT_REQUEST','QUESTION','APPROVAL_NEEDED','BLOCKED','DEADLINE','INCIDENT','FOLLOW_UP','INFORMATIONAL','AUTOMATED_NOTICE','SOCIAL','OTHER'] as const;
+export type ClassificationReasonCode = (typeof CLASSIFICATION_REASON_CODES)[number];
 
 /**
  * The model is asked for JSON mode, but a stray ```json fence still turns up
@@ -215,8 +217,8 @@ const responseSchema = z.object({
   urgency_score: z.unknown(),
   is_bump: z.unknown().optional(),
   bump_of: z.unknown().optional(),
-  reason: z.unknown(),
-});
+  reason_code: z.unknown(),
+}).strict();
 
 /**
  * Phrases that make a message a chase rather than a fresh ask. Used only as a
@@ -260,17 +262,14 @@ export function parseClassificationResponse(
   const body = stripFence(raw);
 
   if (body === '') {
-    throw new ClassificationParseError('empty response', raw);
+    throw new ClassificationParseError('CLASSIFICATION_EMPTY_RESPONSE');
   }
 
   let json: unknown;
   try {
     json = JSON.parse(body);
-  } catch (error) {
-    throw new ClassificationParseError(
-      `response was not JSON: ${error instanceof Error ? error.message : String(error)}`,
-      raw,
-    );
+  } catch {
+    throw new ClassificationParseError('CLASSIFICATION_INVALID_JSON');
   }
 
   const shape = responseSchema.safeParse(json);
@@ -284,8 +283,7 @@ export function parseClassificationResponse(
   const category = normalizeCategory(shape.data.category);
   if (category === null) {
     throw new ClassificationParseError(
-      `unknown category ${JSON.stringify(shape.data.category)}`,
-      raw,
+      'CLASSIFICATION_UNKNOWN_CATEGORY',
     );
   }
 
@@ -295,17 +293,14 @@ export function parseClassificationResponse(
       : shape.data.urgency_score;
   if (typeof scoreValue !== 'number' || !Number.isFinite(scoreValue)) {
     throw new ClassificationParseError(
-      `urgency_score was not a number: ${JSON.stringify(shape.data.urgency_score)}`,
-      raw,
+      'CLASSIFICATION_INVALID_URGENCY',
     );
   }
 
-  const reason =
-    typeof shape.data.reason === 'string' ? shape.data.reason.trim() : '';
-  if (reason === '') {
+  const reasonCode = shape.data.reason_code;
+  if (typeof reasonCode !== 'string' || !(CLASSIFICATION_REASON_CODES as readonly string[]).includes(reasonCode)) {
     throw new ClassificationParseError(
-      'reason is required (CLAUDE.md: reasoning is stored with every score)',
-      raw,
+      'CLASSIFICATION_UNKNOWN_REASON_CODE',
     );
   }
 
@@ -335,8 +330,6 @@ export function parseClassificationResponse(
     category,
     isBump,
     bumpOfMessageId,
-    // Keep the stored reason short enough to render on a row without wrapping
-    // the whole pane; the model is asked for one sentence anyway.
-    reason: reason.length > 300 ? `${reason.slice(0, 297)}...` : reason,
+    reasonCode: reasonCode as ClassificationReasonCode,
   };
 }

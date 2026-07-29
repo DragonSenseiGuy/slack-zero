@@ -132,7 +132,7 @@ describe('sendReplyToMessage on success', () => {
   it('replies into the thread of a thread parent, not the channel', async () => {
     messageFindUnique.mockResolvedValue({
       ...MESSAGE,
-      isThreadParent: true,
+      threadTs: MESSAGE.ts,
     });
     sendReply.mockResolvedValue({ ts: '1' });
 

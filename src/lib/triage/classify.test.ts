@@ -43,7 +43,7 @@ const GOOD_REPLY = JSON.stringify({
   urgency_score: 55,
   is_bump: false,
   bump_of: null,
-  reason: 'asks you to approve a staging access request',
+  reason_code: 'APPROVAL_NEEDED',
 });
 
 function respond(text: string, model = 'qwen/qwen3-32b') {
@@ -68,7 +68,7 @@ describe('classifyMessage', () => {
     expect(result.category).toBe('action_needed');
     expect(result.urgencyScore).toBe(55);
     expect(result.isBump).toBe(false);
-    expect(result.reason).toBe('asks you to approve a staging access request');
+    expect(result.reasonCode).toBe('APPROVAL_NEEDED');
     // Recording the served model means a model change is visible in the data
     // rather than silently rewriting the meaning of stored scores.
     expect(result.model).toBe('qwen/qwen3-32b');
@@ -130,7 +130,7 @@ describe('classifyMessage', () => {
         urgency_score: 60,
         is_bump: true,
         bump_of: 1,
-        reason: 'chases the earlier unanswered approval request',
+        reason_code: 'FOLLOW_UP',
       }),
     );
 
@@ -157,7 +157,7 @@ describe('classifyMessage', () => {
     respond('the model felt chatty today');
 
     await expect(classifyMessage(context())).rejects.toThrow(
-      /was not JSON|empty response/,
+      'CLASSIFICATION_INVALID_JSON',
     );
   });
 

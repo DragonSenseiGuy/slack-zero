@@ -34,7 +34,7 @@ import {
 
 export type IngestResult =
   | { action: 'created'; conversationId: string; ts: string; userId: string | null }
-  | { action: 'updated'; conversationId: string; ts: string; userId: string | null }
+  | { action: 'updated'; conversationId: string; ts: string; userId: string | null; contentChanged: boolean }
   | { action: 'deleted'; conversationId: string; ts: string }
   | { action: 'reaction'; conversationId: string; ts: string; name: string }
   | { action: 'ignored'; reason: string };
@@ -57,6 +57,7 @@ export class SocketModeNotConfiguredError extends Error {
  */
 export async function handleMessageEvent(
   event: RawSlackMessage,
+  authedUserId?: string | null,
 ): Promise<IngestResult> {
   const normalized = normalizeMessageEvent(event);
 
@@ -79,13 +80,28 @@ export async function handleMessageEvent(
     }
 
     case 'upsert': {
-      const outcome = await upsertMessage(normalized.message, 'EVENT');
-      return {
-        action: outcome,
+      // The listener passes this from its already-loaded Slack context. The
+      // fallback exists for direct handler tests/event-boundary callers only.
+      const channelish = normalized.message.conversationId[0] !== 'D';
+      const currentAuthedUserId = channelish && authedUserId === undefined
+        ? (await import('@/lib/slack/installation')).getInstallation().then((row) => row?.authedUserId ?? null)
+        : authedUserId;
+      const edited = event.subtype === 'message_changed';
+      const outcome = channelish
+        ? edited
+          ? await upsertMessage(normalized.message, 'EVENT', await currentAuthedUserId, { clearClassification: true })
+          : await upsertMessage(normalized.message, 'EVENT', await currentAuthedUserId)
+        : edited
+          ? await upsertMessage(normalized.message, 'EVENT', undefined, { clearClassification: true })
+          : await upsertMessage(normalized.message, 'EVENT');
+      const persisted = {
         conversationId: normalized.message.conversationId,
         ts: normalized.message.ts,
         userId: normalized.message.userId,
       };
+      return outcome === 'created'
+        ? { action: 'created', ...persisted }
+        : { action: 'updated', ...persisted, contentChanged: event.subtype === 'message_changed' };
     }
   }
 }
@@ -142,6 +158,8 @@ export async function startSocketModeListener(
 
   configureClassificationScheduler({ onLog: log });
 
+  const { authedUserId } = await (await import('@/lib/slack/client')).getSlackContext();
+
   const socket = new SocketModeClient({ appToken });
 
   /**
@@ -163,7 +181,7 @@ export async function startSocketModeListener(
         // classification never block ingestion, so this call is deliberately
         // fire-and-forget and lives in the wiring rather than inside
         // `handleMessageEvent`, which stays a pure ingest path.
-        if (result.action === 'created') {
+        if (result.action === 'created' || (result.action === 'updated' && result.contentChanged)) {
           scheduleClassificationForSlackMessage(result.conversationId, result.ts);
         }
 
@@ -193,7 +211,7 @@ export async function startSocketModeListener(
   };
 
   const onMessage = withAck((event) =>
-    handleMessageEvent(event as RawSlackMessage),
+    handleMessageEvent(event as RawSlackMessage, authedUserId),
   );
   const onReaction = withAck((event) =>
     handleReactionEvent(event as RawReactionEvent),

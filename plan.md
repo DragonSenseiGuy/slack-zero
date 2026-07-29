@@ -1113,6 +1113,81 @@ copy.
 
 ---
 
+### Privacy-first Slack data storage (2026-07-29)
+**Status:** Done
+
+**Objective:** Treat Slack as the source of truth for Slack-owned content and
+retain only stable identifiers, ingestion bookkeeping, and SlackZero-owned
+triage state in Postgres.
+
+**Tasks:**
+- Encrypt Slack OAuth tokens at rest with a server-supplied encryption key.
+- Replace persisted message/profile/conversation content with identifier-only
+  records and a safe migration that scrubs existing private data without
+  printing it.
+- Hydrate message text, user profiles, and conversation labels from Slack on
+  demand through bounded, short-lived, process-local caches.
+- Make queue, thread/context, reply drafting, classification, waiting-on, and
+  stats paths work without a persisted transcript.
+- Evict deleted content immediately in the receiving process, persist a
+  content-free tombstone so other processes never serve stale cache entries,
+  and remove content-derived classification/waiting-on data.
+- Replace free-form classification reasons with closed categorical reason
+  codes and keep prompts, responses, and private message text out of logs.
+- Document cold-start/rate-limit behavior and the privacy implications of
+  backups and rollback.
+
+**Verification:**
+- Unit tests prove forbidden Slack content is absent from database writes,
+  queue/thread hydration fetches Slack content on demand, cache TTL and maximum
+  size eviction work, and deletion events evict content immediately.
+- Unit tests prove classification reasons cannot contain excerpts and OAuth
+  tokens are encrypted in Postgres and decrypted only at the server boundary.
+- Integration/e2e coverage proves triage state survives cache misses and process
+  restarts.
+- `npm run test`, `npm run typecheck`, `npm run lint`, `npm run build`, and
+  `npm run test:e2e` pass in one final verification run.
+
+**Findings and tradeoffs:**
+- Postgres now keeps Slack identifiers/routing bookkeeping and SlackZero-owned
+  state only. Message bodies, blocks, reactions, profile/display metadata,
+  channel descriptions, and prose model output are absent from the schema.
+- OAuth tokens use AES-256-GCM envelopes keyed by
+  `SLACK_TOKEN_ENCRYPTION_KEY`; plaintext credentials are rejected by the
+  migration. The pre-migration command encrypts and scrubs without printing
+  values.
+- Rendering, context, replies, waiting detection, and classification hydrate
+  Slack-owned data on demand. Process-local caches expire after 60 seconds,
+  have explicit size limits, validate message revisions/tombstones on reads,
+  and are never persisted. Inbox hydration has a shared 100-request budget;
+  exhausted reads render safely unavailable rather than retaining content.
+- Deletions retain identifier/state tombstones, evict cached content, and clear
+  content-derived classification/waiting state. Edits atomically advance the
+  message revision and clear classification, preventing stale cache/model work
+  from being committed.
+- Cold starts can be slower and Slack API failures can temporarily hide live
+  content while stable done/snooze/VIP/view state remains in Postgres. Bounded
+  waiting scans make no state changes when incomplete.
+- Backups, WAL, replicas, and snapshots made before the scrub can still contain
+  private Slack data or plaintext tokens. Rollback is roll-forward plus Slack
+  re-hydration, not restoration of an old transcript-bearing backup; details
+  are in `PRIVACY_MIGRATION.md`.
+
+**Completed verification (2026-07-29):**
+- `npm run test` → 629 tests / 30 files passed.
+- `npm run typecheck`, `npm run lint`, `npm run build`, and
+  `git diff --check` passed.
+- `npm run test:e2e` → 50 passed / 1 opt-in live-send test skipped; a subsequent
+  focused rerun of the one timing-sensitive context spec passed 3/3.
+- `npm run backfill:verify` matched Slack and identifier-only database counts;
+  one known inaccessible conversation was safely reported as
+  `channel_not_found`.
+- Privacy assertions: 0 forbidden columns, 0 unencrypted installations, and 0
+  deleted messages retaining classification/waiting-derived state.
+- Final blocker review reported the implementation safe to commit.
+
+---
+
 ## Done Criteria for the Overall Project
 All 8 phases marked `Done`, full test suite green, and a working app that can
 OAuth into a real Slack workspace, ingest DMs/mentions, classify and sort

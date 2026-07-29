@@ -93,7 +93,7 @@ async function evaluate(
       category: parsed.category,
       urgencyScore: parsed.urgencyScore,
       isBump: parsed.isBump,
-      reason: parsed.reason,
+      reason: parsed.reasonCode,
       categoryOk: parsed.category === fixture.expected.category,
       urgencyOk: parsed.urgencyScore >= min && parsed.urgencyScore <= max,
       bumpOk: parsed.isBump === fixture.expected.isBump,

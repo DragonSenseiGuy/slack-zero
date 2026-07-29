@@ -10,9 +10,8 @@
  */
 import 'dotenv/config';
 
-import { WebClient } from '@slack/web-api';
-
 import { prisma } from '../src/lib/db';
+import { getSlackContext } from '../src/lib/slack/client';
 
 type Row = {
   what: string;
@@ -22,16 +21,12 @@ type Row = {
 };
 
 async function main(): Promise<void> {
-  const installation = await prisma.slackInstallation.findFirst({
-    orderBy: { updatedAt: 'desc' },
-  });
-  if (!installation) throw new Error('No Slack installation stored.');
-
-  const slack = new WebClient(installation.userAccessToken);
-  const me = installation.authedUserId;
+  const context = await getSlackContext();
+  const slack = context.client;
+  const me = context.authedUserId;
   const rows: Row[] = [];
 
-  console.log(`Cross-checking ${installation.teamName} as ${me}\n`);
+  console.log(`Cross-checking ${context.teamName ?? context.teamId} as ${me}\n`);
 
   // --- Users -------------------------------------------------------------
   const users = await slack.users.list({ limit: 200 });
@@ -97,19 +92,35 @@ async function main(): Promise<void> {
   });
 
   // --- Channel mentions --------------------------------------------------
-  const search = await slack.search.messages({
-    query: `<@${me}>`,
-    count: 100,
+  const mentionMatches: Array<{ channel?: { id?: string }; ts?: string }> = [];
+  let mentionPage = 1;
+  let mentionPages = 1;
+  do {
+    const search = await slack.search.messages({ query: `<@${me}>`, count: 100, page: mentionPage });
+    mentionMatches.push(...((search.messages?.matches ?? []) as typeof mentionMatches));
+    mentionPages = search.messages?.paging?.pages ?? mentionPage;
+    mentionPage += 1;
+  } while (mentionPage <= mentionPages);
+  const slackMentionKeys = new Set(
+    mentionMatches.flatMap((match) => {
+      const channelId = match.channel?.id;
+      return channelId && match.ts ? [`${channelId}:${match.ts}`] : [];
+    }),
+  );
+  const dbMentionIdentities = await prisma.message.findMany({
+    where: { OR: [...slackMentionKeys].map((key) => {
+      const separator = key.indexOf(':');
+      return { conversationId: key.slice(0, separator), ts: key.slice(separator + 1) };
+    }) },
+    select: { conversationId: true, ts: true },
   });
+  const dbMentionKeys = new Set(dbMentionIdentities.map((row) => `${row.conversationId}:${row.ts}`));
+  const identityMatch = slackMentionKeys.size === dbMentionKeys.size && [...slackMentionKeys].every((key) => dbMentionKeys.has(key));
   rows.push({
     what: 'channel mentions of me',
-    slack: search.messages?.total ?? 0,
-    db: await prisma.message.count({
-      where: {
-        conversation: { kind: { in: ['PUBLIC_CHANNEL', 'PRIVATE_CHANNEL'] } },
-        mentionedUserIds: { has: me },
-      },
-    }),
+    slack: slackMentionKeys.size,
+    db: dbMentionKeys.size,
+    note: identityMatch ? undefined : 'identity sets differ',
   });
 
   // --- Report ------------------------------------------------------------

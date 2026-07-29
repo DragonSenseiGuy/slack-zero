@@ -4,6 +4,7 @@ import { forwardRef, useEffect, useState } from 'react';
 
 import type { QueueItem } from '@/lib/queue/queue';
 import { effectiveUrgency } from '@/lib/queue/queue';
+import { REASON_CODE_LABEL } from '@/lib/triage/types';
 import {
   bumpStalenessLabel,
   burstSpanLabel,
@@ -66,7 +67,7 @@ function TriageExplainer({ item, nowIso }: { item: QueueItem; nowIso: string }) 
         className="mt-1.5 text-xs text-neutral-700"
         data-testid="triage-reason"
       >
-        {item.triage.reason}
+        {REASON_CODE_LABEL[item.triage.reasonCode]}
       </p>
 
       {item.bumps ? (

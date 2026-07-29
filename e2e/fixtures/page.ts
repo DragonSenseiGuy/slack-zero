@@ -1,6 +1,6 @@
 import { expect, type Page } from '@playwright/test';
 
-import { FIXTURE_CHANNEL_NAME } from './seed';
+import { FIXTURE_CHANNEL_ID, FIXTURE_CHANNEL_NAME } from './seed';
 
 /**
  * Page helpers shared by every inbox spec.
@@ -19,7 +19,7 @@ export async function loadInbox(
 ): Promise<void> {
   await page.goto(
     options.scopeToFixtures
-      ? `/inbox?in=${encodeURIComponent(FIXTURE_CHANNEL_NAME)}`
+      ? `/inbox?in=${encodeURIComponent(FIXTURE_CHANNEL_ID)}`
       : '/inbox',
   );
   await expect(page.getByTestId('queue-pane')).toHaveAttribute(

@@ -1,4 +1,4 @@
-import { Prisma, type IngestSource } from '@prisma/client';
+import type { IngestSource } from '@prisma/client';
 
 import { prisma } from '@/lib/db';
 import type {
@@ -7,6 +7,8 @@ import type {
   NormalizedReaction,
   NormalizedUser,
 } from '@/lib/slack/normalize';
+import { isNonContentMessage, parseSlackTs } from '@/lib/slack/normalize';
+import { messageCacheKey, slackMessageCache } from '@/lib/slack/cache';
 
 export type UpsertOutcome = 'created' | 'updated';
 
@@ -14,14 +16,6 @@ export type UpsertOutcome = 'created' | 'updated';
  * Prisma distinguishes JSON `null` from SQL `NULL`; we always want the latter
  * for "Slack sent nothing here", so absence stays absence.
  */
-function jsonOrDbNull(value: unknown): Prisma.InputJsonValue | typeof Prisma.DbNull {
-  if (value === null || value === undefined) return Prisma.DbNull;
-  // Slack payloads are JSON by definition — they arrived over the wire as
-  // JSON — but TypeScript can't know that from `unknown`, so assert it here
-  // rather than weakening the normalized types.
-  return value as Prisma.InputJsonValue;
-}
-
 // ---------------------------------------------------------------------------
 // Users
 // ---------------------------------------------------------------------------
@@ -32,23 +26,11 @@ export async function upsertUser(user: NormalizedUser): Promise<UpsertOutcome> {
     select: { id: true },
   });
 
-  const data = {
-    teamId: user.teamId,
-    username: user.username,
-    realName: user.realName,
-    displayName: user.displayName,
-    avatarUrl: user.avatarUrl,
-    timezone: user.timezone,
-    isBot: user.isBot,
-    isDeleted: user.isDeleted,
-  };
-
   if (existing) {
-    await prisma.user.update({ where: { id: user.id }, data });
     return 'updated';
   }
 
-  await prisma.user.create({ data: { id: user.id, ...data } });
+  await prisma.user.create({ data: { id: user.id } });
   return 'created';
 }
 
@@ -81,16 +63,7 @@ export async function upsertConversation(
     select: { id: true },
   });
 
-  const data = {
-    teamId: conversation.teamId,
-    kind: conversation.kind,
-    name: conversation.name,
-    peerUserId: conversation.peerUserId,
-    topic: conversation.topic,
-    purpose: conversation.purpose,
-    isArchived: conversation.isArchived,
-    isMember: conversation.isMember,
-  };
+  const data = { kind: conversation.kind, peerUserId: conversation.peerUserId };
 
   if (existing) {
     await prisma.conversation.update({ where: { id: conversation.id }, data });
@@ -126,14 +99,8 @@ export async function ensureConversationFromReference(
   await prisma.conversation.create({
     data: {
       id: conversation.id,
-      teamId: conversation.teamId,
       kind: conversation.kind,
-      name: conversation.name,
       peerUserId: conversation.peerUserId,
-      topic: conversation.topic,
-      purpose: conversation.purpose,
-      isArchived: conversation.isArchived,
-      isMember: conversation.isMember,
     },
   });
   return 'created';
@@ -195,6 +162,8 @@ function kindFromId(conversationId: string): NormalizedConversation['kind'] {
 export async function upsertMessage(
   message: NormalizedMessage,
   source: IngestSource = 'BACKFILL',
+  authedUserId?: string | null,
+  options: { clearClassification?: boolean } = {},
 ): Promise<UpsertOutcome> {
   await ensureConversationExists(
     message.conversationId,
@@ -207,20 +176,10 @@ export async function upsertMessage(
   const data = {
     sentAt: message.sentAt,
     threadTs: message.threadTs,
-    isThreadReply: message.isThreadReply,
-    isThreadParent: message.isThreadParent,
-    replyCount: message.replyCount,
     userId: message.userId,
-    botId: message.botId,
-    authorName: message.authorName,
-    subtype: message.subtype,
-    text: message.text,
-    blocks: jsonOrDbNull(message.blocks),
-    isEdited: message.isEdited,
-    editedAt: message.editedAt,
-    hasFiles: message.hasFiles,
-    reactions: jsonOrDbNull(message.reactions),
-    mentionedUserIds: message.mentionedUserIds,
+    isContent: !isNonContentMessage(message),
+    mentionsAuthedUser:
+      Boolean(authedUserId) && message.mentionedUserIds.includes(authedUserId!),
   };
 
   const existing = await prisma.message.findUnique({
@@ -238,7 +197,18 @@ export async function upsertMessage(
     // *first* saw a message. A later backfill re-reading a message that
     // arrived live would otherwise flip it EVENT -> BACKFILL and erase the
     // evidence that the Socket Mode path ever worked.
-    await prisma.message.update({ where: { id: existing.id }, data });
+    if (options.clearClassification) {
+      const key = messageCacheKey(message.conversationId, message.ts);
+      slackMessageCache.delete(key);
+      await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "Message" WHERE id = ${existing.id} FOR UPDATE`;
+        await tx.message.update({ where: { id: existing.id }, data });
+        await tx.classification.deleteMany({ where: { messageId: existing.id } });
+      });
+      slackMessageCache.delete(key);
+    } else {
+      await prisma.message.update({ where: { id: existing.id }, data });
+    }
     return 'updated';
   }
 
@@ -265,11 +235,35 @@ export async function markMessageDeleted(
   ts: string,
   deletedAt: Date = new Date(),
 ): Promise<boolean> {
-  const result = await prisma.message.updateMany({
-    where: { conversationId, ts, isDeleted: false },
-    data: { isDeleted: true, deletedAt },
+  slackMessageCache.delete(messageCacheKey(conversationId, ts));
+  const existed = await prisma.$transaction(async (tx) => {
+    await tx.conversation.upsert({
+      where: { id: conversationId },
+      create: { id: conversationId, kind: kindFromId(conversationId) },
+      update: {},
+    });
+    const prior = await tx.message.findUnique({
+      where: { conversationId_ts: { conversationId, ts } },
+      select: { id: true, isDeleted: true },
+    });
+    const message = await tx.message.upsert({
+      where: { conversationId_ts: { conversationId, ts } },
+      create: { conversationId, ts, sentAt: parseSlackTs(ts), source: 'EVENT', isDeleted: true, deletedAt },
+      update: { isDeleted: true, deletedAt },
+      select: { id: true },
+    });
+    await tx.$queryRaw`SELECT id FROM "Message" WHERE id = ${message.id} FOR UPDATE`;
+    await tx.classification.deleteMany({ where: { messageId: message.id } });
+    await tx.messageState.updateMany({
+      where: { messageId: message.id },
+      data: { isWaitingOn: false, waitingOnSince: null },
+    });
+    return Boolean(prior && !prior.isDeleted);
   });
-  return result.count > 0;
+  // A fetch that began before the tombstone may have populated the cache
+  // while the transaction waited. Evict again after commit.
+  slackMessageCache.delete(messageCacheKey(conversationId, ts));
+  return existed;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +314,7 @@ export async function applyReactionEvent(change: {
   userId: string;
   added: boolean;
 }): Promise<boolean> {
+  slackMessageCache.delete(messageCacheKey(change.conversationId, change.ts));
   const message = await prisma.message.findUnique({
     where: {
       conversationId_ts: {
@@ -327,18 +322,10 @@ export async function applyReactionEvent(change: {
         ts: change.ts,
       },
     },
-    select: { id: true, reactions: true },
+    select: { id: true },
   });
 
   if (!message) return false;
 
-  // Round-tripped through JSON by Postgres, so re-assert the shape we wrote.
-  const current = (message.reactions as NormalizedReaction[] | null) ?? null;
-  const merged = mergeReaction(current, change);
-
-  await prisma.message.update({
-    where: { id: message.id },
-    data: { reactions: jsonOrDbNull(merged) },
-  });
   return true;
 }

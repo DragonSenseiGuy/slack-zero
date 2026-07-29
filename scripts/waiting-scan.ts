@@ -20,7 +20,8 @@
 import 'dotenv/config';
 
 import { prisma } from '../src/lib/db';
-import { getInstallation } from '../src/lib/slack/installation';
+import { getSlackContext } from '../src/lib/slack/client';
+import { scanWaitingWindow } from '../src/lib/waiting/scan';
 import {
   detectWaitingOn,
   describeWait,
@@ -29,6 +30,7 @@ import {
 } from '../src/lib/waiting/detect';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+export const MAX_WAITING_IDENTITY_ROWS = 10_000;
 
 function arg(name: string, fallback: number): number {
   const index = process.argv.indexOf(`--${name}`);
@@ -38,8 +40,10 @@ function arg(name: string, fallback: number): number {
 }
 
 async function main(): Promise<void> {
-  const installation = await getInstallation();
-  if (!installation) {
+  let slack;
+  try {
+    slack = await getSlackContext();
+  } catch {
     console.error(
       'No Slack installation stored. Connect a workspace first (SLACK_APP_SETUP.md).',
     );
@@ -51,60 +55,63 @@ async function main(): Promise<void> {
   const since = new Date(Date.now() - days * DAY_MS);
   const now = new Date();
 
-  const rows = await prisma.message.findMany({
+  const loadedRows = await prisma.message.findMany({
     where: { sentAt: { gte: since } },
     select: {
       id: true,
       conversationId: true,
       userId: true,
-      text: true,
+      ts: true,
       sentAt: true,
       threadTs: true,
       isDeleted: true,
-      reactions: true,
     },
     orderBy: { sentAt: 'asc' },
+    take: MAX_WAITING_IDENTITY_ROWS + 1,
   });
+  const identityTruncated = loadedRows.length > MAX_WAITING_IDENTITY_ROWS;
+  const rows = loadedRows.slice(0, MAX_WAITING_IDENTITY_ROWS);
 
-  const candidates: WaitingCandidate[] = rows.map((row) => ({
-    id: row.id,
-    conversationId: row.conversationId,
-    userId: row.userId,
-    text: row.text,
-    sentAt: row.sentAt,
-    threadTs: row.threadTs,
-    isDeleted: row.isDeleted,
-    hasReactions: Array.isArray(row.reactions) && row.reactions.length > 0,
-  }));
+  const scan = await scanWaitingWindow(slack.client, rows, since);
+  if (identityTruncated) {
+    scan.complete = false;
+    scan.errors.push('WAITING_IDENTITY_CAP_EXCEEDED');
+  }
+  const candidates: WaitingCandidate[] = scan.candidates;
 
   const waiting = detectWaitingOn(candidates, {
-    authedUserId: installation.authedUserId,
+    authedUserId: slack.authedUserId,
     now,
   });
 
   const waitingIds = new Set(waiting.map((result) => result.messageId));
 
-  // Set the flag on everything currently waiting.
-  for (const result of waiting) {
-    await prisma.messageState.upsert({
-      where: { messageId: result.messageId },
-      create: {
-        messageId: result.messageId,
-        isWaitingOn: true,
-        waitingOnSince: result.askedAt,
-      },
-      update: { isWaitingOn: true, waitingOnSince: result.askedAt },
-    });
-  }
+  let cleared = { count: 0 };
+  if (scan.complete) await prisma.$transaction(async (tx) => {
+    for (const result of waiting) {
+      await tx.$queryRaw`SELECT id FROM "Message" WHERE id = ${result.messageId} FOR UPDATE`;
+      const target = await tx.message.findUnique({ where: { id: result.messageId }, select: { isDeleted: true } });
+      if (!target || target.isDeleted) continue;
+      await tx.messageState.upsert({
+        where: { messageId: result.messageId },
+        create: {
+          messageId: result.messageId,
+          isWaitingOn: true,
+          waitingOnSince: result.askedAt,
+        },
+        update: { isWaitingOn: true, waitingOnSince: result.askedAt },
+      });
+    }
 
-  // And clear it everywhere it no longer holds — an ask that has since been
-  // answered must stop being reported.
-  const cleared = await prisma.messageState.updateMany({
-    where: {
-      isWaitingOn: true,
-      messageId: { notIn: waitingIds.size > 0 ? [...waitingIds] : ['__none__'] },
-    },
-    data: { isWaitingOn: false, waitingOnSince: null },
+    const scannedIds = candidates.map((candidate) => candidate.id);
+    cleared = await tx.messageState.updateMany({
+      where: {
+        isWaitingOn: true,
+        messageId: { in: scannedIds },
+        NOT: { messageId: { in: waitingIds.size > 0 ? [...waitingIds] : ['__none__'] } },
+      },
+      data: { isWaitingOn: false, waitingOnSince: null },
+    });
   });
 
   const summary = {
@@ -112,6 +119,8 @@ async function main(): Promise<void> {
     windowDays: days,
     waitingOn: waiting.length,
     cleared: cleared.count,
+    complete: scan.complete,
+    errors: scan.errors,
     nudges: waiting.filter(
       (result) => stalenessOf(result.askedAt, now) === 'stale',
     ).length,

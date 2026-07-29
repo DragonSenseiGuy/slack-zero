@@ -31,19 +31,16 @@ model SlackInstallation {
 
   /// Slack workspace ("team") id, e.g. "T01234567".
   teamId   String
-  /// Human-readable workspace name at install time.
-  teamName String
-
   /// Slack user id of the person who authorized the app, e.g. "U01234567".
   authedUserId String
 
   /// User token (xoxp-...) from `authed_user.access_token`. This is the token
   /// the app acts with. Server-side only — never send it to the client.
-  userAccessToken String
+  encryptedUserAccessToken String
 
   /// Bot token (xoxb-...), if any bot scopes were granted. Nullable because
   /// SlackZero is primarily a user-token app.
-  botAccessToken String?
+  encryptedBotAccessToken String?
 
   /// Space-delimited scopes actually granted, as returned by Slack.
   scopes String
@@ -75,27 +72,11 @@ enum IngestSource {
   EVENT
 }
 
-/// A Slack workspace member (human or bot user), as needed to render a message
-/// author. Populated from `users.list` during backfill.
+/// A Slack workspace member identity. Render metadata is hydrated live and is
+/// deliberately not persisted.
 model User {
   /// Slack user id, e.g. "U01234567" or "USLACKBOT".
   id String @id
-
-  teamId String?
-
-  /// Slack's `name` (the handle), e.g. "ada".
-  username    String?
-  /// `profile.real_name`, e.g. "Ada Lovelace".
-  realName    String?
-  /// `profile.display_name` — what Slack actually shows, when set.
-  displayName String?
-  /// `profile.image_72`. A URL only; we never proxy or cache the image.
-  avatarUrl   String?
-  /// IANA tz, e.g. "America/New_York". Phase 7 wants it for response times.
-  timezone    String?
-
-  isBot     Boolean @default(false)
-  isDeleted Boolean @default(false)
 
   /// Marked important by the user. plan.md, Phase 4 lists VIP as both a filter
   /// and a sort ("VIP-unreads-on-top"), and nothing in Slack's API carries this
@@ -113,24 +94,12 @@ model Conversation {
   /// Slack conversation id: "D..." for IMs, "C..."/"G..." for channels/mpims.
   id String @id
 
-  teamId String?
   kind   ConversationKind
-
-  /// Channel name without the leading "#". Null for IMs, which have no name.
-  name String?
 
   /// For an IM, the Slack id of the person on the other end. Slack reports
   /// this as `channel.user`. Null for channels and group DMs.
   peerUserId String?
 
-  topic   String?
-  purpose String?
-
-  isArchived Boolean @default(false)
-  /// Whether the authed user is a member. Public channels are readable with
-  /// `channels:history` without joining, so this is display metadata, not a
-  /// permission check.
-  isMember   Boolean @default(false)
 
   messages Message[]
 
@@ -165,49 +134,20 @@ model Message {
   /// `thread_ts` when the message belongs to a thread. Equals `ts` on the
   /// thread parent, differs on a reply.
   threadTs String?
-  /// True when this is a reply *inside* a thread (`thread_ts != ts`).
-  isThreadReply Boolean @default(false)
-  /// True when this message has a thread hanging off it (`thread_ts == ts`).
-  isThreadParent Boolean @default(false)
-  /// Slack's `reply_count` on a thread parent; 0 otherwise.
-  replyCount Int @default(0)
 
   /// Author. Null for classic bot messages, which carry only a `bot_id`.
   userId String?
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
-
-  /// Slack `bot_id` for messages posted by an integration.
-  botId String?
-  /// `username`/`bot_profile.name` — the display name for a bot message whose
-  /// author has no `User` row.
-  authorName String?
-
-  /// Slack message subtype ("bot_message", "channel_join", ...). Null for an
-  /// ordinary human message.
-  subtype String?
-
-  text String
-
-  /// Slack Block Kit payload, kept verbatim so richer rendering stays possible
-  /// later without re-fetching. Never read by the UI as-is.
-  blocks Json?
-
-  isEdited Boolean   @default(false)
-  editedAt DateTime?
 
   /// Soft delete: Slack sends `message_deleted` and we keep the row so
   /// classification/state history is not orphaned.
   isDeleted Boolean   @default(false)
   deletedAt DateTime?
 
-  hasFiles Boolean @default(false)
-
-  /// Normalized reactions: `[{ name, count, userIds }]`, sorted by name so the
-  /// stored value is stable across re-ingestion.
-  reactions Json?
-
-  /// Slack user ids mentioned in the text, parsed from `<@U...>`.
-  mentionedUserIds String[]
+  /// Content-free routing facts derived at ingestion. These allow queue and
+  /// classifier selection without persisting Slack text, subtypes, or mention ids.
+  isContent         Boolean @default(true)
+  mentionsAuthedUser Boolean @default(false)
 
   source IngestSource @default(BACKFILL)
 
@@ -222,6 +162,7 @@ model Message {
   @@unique([conversationId, ts])
   @@index([sentAt])
   @@index([conversationId, threadTs])
+  @@index([isDeleted, isContent, mentionsAuthedUser])
 }
 
 /// Phase 3 fills this in. Defined here so the ingestion schema is complete.
@@ -231,8 +172,22 @@ enum MessageCategory {
   FYI
 }
 
-/// AI triage output for one message. One row per message (latest result wins);
-/// `reason` is mandatory because CLAUDE.md requires scores be debuggable.
+enum ClassificationReasonCode {
+  DIRECT_REQUEST
+  QUESTION
+  APPROVAL_NEEDED
+  BLOCKED
+  DEADLINE
+  INCIDENT
+  FOLLOW_UP
+  INFORMATIONAL
+  AUTOMATED_NOTICE
+  SOCIAL
+  OTHER
+}
+
+/// AI triage output for one message. One row per message (latest result wins).
+/// A structured reason code keeps results debuggable without persisting prose.
 model Classification {
   id String @id @default(cuid())
 
@@ -248,8 +203,8 @@ model Classification {
   /// The earlier message this one bumps, if identified.
   bumpOfMessageId String?
 
-  /// The model's short explanation. Required, not optional metadata.
-  reason String
+  /// A structured explanation category; no model-generated prose is stored.
+  reasonCode ClassificationReasonCode
 
   /// Model id that produced this, e.g. "qwen/qwen3-32b" — so a model change is
   /// visible in the data rather than silently reinterpreting old scores.

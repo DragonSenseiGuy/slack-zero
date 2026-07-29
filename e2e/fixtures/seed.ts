@@ -125,8 +125,7 @@ export async function deliverLateMessage(authedUserId: string): Promise<void> {
       source: 'EVENT',
       ts: `${Math.floor(sentAt.getTime() / 1000)}.000200`,
       sentAt,
-      text: `<@${authedUserId}> ${LATE_MESSAGE_TEXT}`,
-      mentionedUserIds: [authedUserId],
+      mentionsAuthedUser: true,
     },
   });
 }
@@ -244,17 +243,9 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
     data: [
       {
         id: FIXTURE_USER_ID,
-        username: 'e2e-fixture',
-        realName: FIXTURE_USER_LABEL,
-        displayName: FIXTURE_USER_LABEL,
-        isBot: false,
       },
       {
         id: FIXTURE_BYSTANDER_ID,
-        username: 'e2e-bystander',
-        realName: FIXTURE_BYSTANDER_LABEL,
-        displayName: FIXTURE_BYSTANDER_LABEL,
-        isBot: false,
       },
     ],
   });
@@ -263,8 +254,6 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
     data: {
       id: FIXTURE_CHANNEL_ID,
       kind: 'PUBLIC_CHANNEL',
-      name: FIXTURE_CHANNEL_NAME,
-      isMember: true,
     },
   });
 
@@ -281,8 +270,7 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
         id: `me2e-msg-${index}`,
         ts: fixtureTs(message.offset),
         sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
-        text: `<@${authedUserId}> ${message.text}`,
-        mentionedUserIds: [authedUserId],
+        mentionsAuthedUser: true,
       })),
       ...FIXTURE_GAP_MESSAGES.map((message, index) => ({
         ...common,
@@ -290,7 +278,6 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
         id: `me2e-gap-${index}`,
         ts: fixtureTs(message.offset),
         sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
-        text: message.text,
       })),
       {
         ...common,
@@ -299,11 +286,8 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
         sentAt: new Date(
           (BASE_EPOCH_SECONDS + FIXTURE_THREAD_PARENT.offset) * 1000,
         ),
-        text: `<@${authedUserId}> ${FIXTURE_THREAD_PARENT.text}`,
-        mentionedUserIds: [authedUserId],
+        mentionsAuthedUser: true,
         threadTs: fixtureTs(FIXTURE_THREAD_PARENT.offset),
-        isThreadParent: true,
-        replyCount: FIXTURE_THREAD_REPLIES.length,
       },
       ...FIXTURE_THREAD_REPLIES.map((reply, index) => ({
         ...common,
@@ -312,9 +296,7 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
         sentAt: new Date((BASE_EPOCH_SECONDS + reply.offset) * 1000),
         // No mention: these must appear *inside* the thread in the reading
         // pane, not as separate rows in the queue.
-        text: reply.text,
         threadTs: fixtureTs(FIXTURE_THREAD_PARENT.offset),
-        isThreadReply: true,
       })),
     ],
   });
@@ -325,7 +307,7 @@ export async function seedInboxFixtures(authedUserId: string): Promise<void> {
       category: result.category,
       urgencyScore: result.urgencyScore,
       isBump: false,
-      reason: 'seeded by the e2e fixtures, not by the model',
+      reasonCode: 'OTHER',
       model: 'e2e-fixture',
     })),
   });
@@ -353,7 +335,6 @@ export async function seedBurstFixture(authedUserId: string): Promise<void> {
         sentAt: new Date(
           (BASE_EPOCH_SECONDS + BURST_MESSAGES[0].offset - 5) * 1000,
         ),
-        text: 'E2E bystander chatter before the burst',
       },
       ...BURST_MESSAGES.map((message, index) => ({
         conversationId: FIXTURE_CHANNEL_ID,
@@ -362,8 +343,7 @@ export async function seedBurstFixture(authedUserId: string): Promise<void> {
         id: `me2e-burst-${index}`,
         ts: fixtureTs(message.offset),
         sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
-        text: `<@${authedUserId}> ${message.text}`,
-        mentionedUserIds: [authedUserId],
+        mentionsAuthedUser: true,
       })),
     ],
   });
@@ -461,7 +441,7 @@ export async function seedDirectMessageFixture(
   // the fixture can never overwrite real directory data.
   await prisma.user.upsert({
     where: { id: authedUserId },
-    create: { id: authedUserId, username: 'authed-user' },
+    create: { id: authedUserId },
     update: {},
   });
 
@@ -471,7 +451,6 @@ export async function seedDirectMessageFixture(
       id: FIXTURE_DM_ID,
       kind: 'IM',
       peerUserId: FIXTURE_USER_ID,
-      isMember: true,
     },
     update: { peerUserId: FIXTURE_USER_ID },
   });
@@ -484,7 +463,6 @@ export async function seedDirectMessageFixture(
       userId: message.fromMe ? authedUserId : FIXTURE_USER_ID,
       ts: fixtureTs(message.offset),
       sentAt: new Date((BASE_EPOCH_SECONDS + message.offset) * 1000),
-      text: message.text,
     })),
   });
 }

@@ -41,7 +41,7 @@ export default defineConfig({
     // Built into its own directory: the default `.next` may be in use by a dev
     // server, and clobbering it leaves that server serving an unstyled page
     // (see the note in next.config.mjs).
-    command: `NEXT_DIST_DIR=.next-e2e npm run build && NEXT_DIST_DIR=.next-e2e npx next start --port ${PORT}`,
+    command: `SLACKZERO_E2E=1 NEXT_DIST_DIR=.next-e2e npm run build && SLACKZERO_E2E=1 NEXT_DIST_DIR=.next-e2e npx next start --port ${PORT}`,
     url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,

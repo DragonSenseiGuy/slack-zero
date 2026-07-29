@@ -111,7 +111,7 @@ async function main(): Promise<void> {
               console.log(
                 `  ${event.messageId}  ${event.result.category.padEnd(13)} ` +
                   `${String(event.result.urgencyScore).padStart(3)}` +
-                  `${event.result.isBump ? '  [bump]' : ''}  ${event.result.reason}`,
+                  `${event.result.isBump ? '  [bump]' : ''}  ${event.result.reasonCode}`,
               );
               break;
             case 'skipped':

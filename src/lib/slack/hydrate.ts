@@ -1,16 +1,8 @@
 import type { WebClient } from '@slack/web-api';
 
-import { prisma } from '@/lib/db';
 import { getSlackContext } from '@/lib/slack/client';
-import { upsertUser } from '@/lib/slack/ingest';
-import { normalizeUser } from '@/lib/slack/normalize';
+import { slackUserCache } from '@/lib/slack/cache';
 import type { RawSlackUser } from '@/lib/slack/raw';
-
-const STUB_WHERE = {
-  username: null,
-  realName: null,
-  displayName: null,
-} as const;
 
 const attempted = new Set<string>();
 
@@ -26,15 +18,9 @@ export type HydrateDeps = {
 export async function findStubUserIds(
   candidateIds: readonly string[],
 ): Promise<string[]> {
-  const ids = [...new Set(candidateIds)].filter(Boolean);
-  if (ids.length === 0) return [];
-
-  const rows = await prisma.user.findMany({
-    where: { id: { in: ids }, ...STUB_WHERE },
-    select: { id: true },
-  });
-
-  return rows.map((row) => row.id);
+  return [...new Set(candidateIds)].filter(
+    (id) => Boolean(id) && !slackUserCache.get(id),
+  );
 }
 
 export async function hydrateStubUsers(
@@ -77,7 +63,7 @@ export async function hydrateStubUsers(
         continue;
       }
 
-      await upsertUser(normalizeUser(member));
+      slackUserCache.set(id, member);
       filled += 1;
       log(`hydrated ${id}`);
     } catch (error) {
@@ -91,15 +77,8 @@ export async function hydrateStubUsers(
 export async function hydrateAllStubUsers(
   deps: HydrateDeps = {},
 ): Promise<number> {
-  const stubs = await prisma.user.findMany({
-    where: STUB_WHERE,
-    select: { id: true },
-  });
-
-  return hydrateStubUsers(
-    stubs.map((row) => row.id),
-    deps,
-  );
+  deps.onLog?.('Profiles are cached on demand; no persistent stubs need hydration.');
+  return 0;
 }
 
 function describe(error: unknown): string {

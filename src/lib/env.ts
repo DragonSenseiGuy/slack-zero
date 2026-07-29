@@ -45,6 +45,7 @@ const envSchema = z.object({
   SLACK_REDIRECT_URI: optionalStringWithDefault(
     'https://localhost:3000/api/slack/oauth/callback',
   ),
+  SLACK_TOKEN_ENCRYPTION_KEY: optionalString,
   APP_BASE_URL: optionalStringWithDefault('https://localhost:3000'),
 
   // --- LLM: Hack Club AI (OpenAI-compatible proxy) ---------------------

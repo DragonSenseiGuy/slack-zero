@@ -5,12 +5,17 @@ import {
   withRateLimitRetry,
   type RateLimiter,
 } from '@/lib/llm/ratelimit';
-import { contextLabelFor, HIDDEN_SUBTYPES, type QueueUser } from '@/lib/queue/queue';
-import { renderSlackText, type LabelLookup } from '@/lib/queue/text';
+import type { QueueUser } from '@/lib/queue/queue';
+import type { LabelLookup } from '@/lib/queue/text';
+import { getSlackContext } from '@/lib/slack/client';
+import { hydrateConversation, hydrateExactMessage, hydrateHistory, hydrateMessageBatch, hydrateThread, hydrateUser } from '@/lib/slack/live';
+import { normalizeConversation, normalizeMessage, normalizeUser, userDisplayLabel } from '@/lib/slack/normalize';
+import type { RawSlackMessage } from '@/lib/slack/raw';
 import { getInstallation } from '@/lib/slack/installation';
 import { classifyMessage, type ClassificationResult } from '@/lib/triage/classify';
 import {
   PREVIOUS_MESSAGE_WINDOW,
+  looksLikeBump,
   type ClassificationContext,
   type PromptPreviousMessage,
 } from '@/lib/triage/prompt';
@@ -61,15 +66,30 @@ export async function selectPendingMessageIds(
     options.authedUserId === undefined
       ? ((await getInstallation())?.authedUserId ?? null)
       : options.authedUserId;
-
-  const hidden = [...HIDDEN_SUBTYPES];
+  if (authedUserId) {
+    const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT m.id FROM "Message" m JOIN "Conversation" c ON c.id = m."conversationId"
+      LEFT JOIN "Classification" cl ON cl."messageId" = m.id
+      WHERE NOT m."isDeleted" AND m."isContent" AND cl."messageId" IS NULL
+        AND (m."userId" IS NULL OR m."userId" <> ${authedUserId}) AND (
+          c.kind IN ('IM', 'MPIM') OR m."mentionsAuthedUser" OR EXISTS (
+            SELECT 1 FROM "Message" authored WHERE authored."conversationId" = m."conversationId"
+              AND authored."userId" = ${authedUserId} AND NOT authored."isDeleted"
+              AND COALESCE(authored."threadTs", authored.ts) = COALESCE(m."threadTs", m.ts)))
+      ORDER BY m."sentAt" DESC, m.ts DESC LIMIT ${limit}`;
+    return rows.map((row) => row.id);
+  }
 
   const rows = await prisma.message.findMany({
     where: {
       isDeleted: false,
+      isContent: true,
       classification: { is: null },
+      OR: [
+        { conversation: { kind: { in: ['IM', 'MPIM'] } } },
+        { mentionsAuthedUser: true },
+      ],
       AND: [
-        { OR: [{ subtype: null }, { subtype: { notIn: hidden } }] },
         ...(authedUserId
           ? [{ OR: [{ userId: null }, { userId: { not: authedUserId } }] }]
           : []),
@@ -101,60 +121,15 @@ export type TriageLookup = {
 export async function loadTriageLookup(
   authedUserId?: string | null,
 ): Promise<TriageLookup> {
-  const [users, conversations, installation] = await Promise.all([
-    prisma.user.findMany({
-      select: {
-        id: true,
-        username: true,
-        realName: true,
-        displayName: true,
-        avatarUrl: true,
-        isBot: true,
-        isVip: true,
-      },
-    }),
-    prisma.conversation.findMany({ select: { id: true, name: true } }),
-    authedUserId === undefined ? getInstallation() : Promise.resolve(null),
-  ]);
-
-  const userMap = new Map<string, QueueUser>(users.map((user) => [user.id, user]));
-
-  const userLabels = new Map<string, string>();
-  for (const user of users) {
-    const label = user.displayName || user.realName || user.username;
-    if (label) userLabels.set(user.id, label);
-  }
-
-  const channelLabels = new Map<string, string>();
-  for (const conversation of conversations) {
-    if (conversation.name) channelLabels.set(conversation.id, conversation.name);
-  }
-
+  const installation = authedUserId === undefined ? await getInstallation() : null;
   return {
-    users: userMap,
-    labels: { users: userLabels, channels: channelLabels },
+    users: new Map(),
+    labels: { users: new Map(), channels: new Map() },
     authedUserId:
       authedUserId === undefined
         ? (installation?.authedUserId ?? null)
         : authedUserId,
   };
-}
-
-function senderLabel(
-  userId: string | null,
-  authorName: string | null,
-  botId: string | null,
-  users: ReadonlyMap<string, QueueUser>,
-): string {
-  const user = userId ? users.get(userId) : undefined;
-  const fromDirectory = user
-    ? user.displayName || user.realName || user.username || user.id
-    : null;
-  if (fromDirectory) return fromDirectory;
-  if (authorName) return authorName;
-  if (userId) return userId;
-  if (botId) return `Bot ${botId}`;
-  return 'Unknown sender';
 }
 
 /**
@@ -173,7 +148,7 @@ export async function loadClassificationContext(
   lookup: TriageLookup,
   now: Date = new Date(),
 ): Promise<ClassificationContext | null> {
-  const message = await prisma.message.findUnique({
+  const identity = await prisma.message.findUnique({
     where: { id: messageId },
     select: {
       id: true,
@@ -181,57 +156,60 @@ export async function loadClassificationContext(
       ts: true,
       sentAt: true,
       threadTs: true,
-      isThreadReply: true,
       userId: true,
-      authorName: true,
-      botId: true,
-      text: true,
-      mentionedUserIds: true,
+      updatedAt: true,
       conversation: {
-        select: { id: true, kind: true, name: true, peerUserId: true },
+        select: { id: true, kind: true, peerUserId: true },
       },
     },
   });
 
-  if (!message || message.text.trim() === '') return null;
+  if (!identity) return null;
+  const slack = await getSlackContext();
+  const raw = await hydrateExactMessage(slack.client, identity.conversationId, identity.ts);
+  if (!raw) return null;
+  const message = normalizeMessage(raw, identity.conversationId);
+  if (!message.text.trim()) return null;
+  const bumpLike = looksLikeBump(message.text);
+  const [rawUser, rawConversation, history] = await Promise.all([
+    message.userId ? hydrateUser(slack.client, message.userId) : Promise.resolve(null),
+    hydrateConversation(slack.client, identity.conversationId),
+    !bumpLike
+      ? Promise.resolve({ messages: [] })
+      : identity.threadTs
+      ? hydrateThread(slack.client, identity.conversationId, identity.threadTs)
+      : hydrateHistory(slack.client, identity.conversationId, identity.ts, PREVIOUS_MESSAGE_WINDOW * 3),
+  ]);
+  const user = rawUser ? normalizeUser(rawUser) : null;
+  const conversation = rawConversation ? normalizeConversation(rawConversation) : { ...identity.conversation, name: null };
 
   // Earlier messages from the *same sender*, so a chase can be matched to the
   // ask it chases. Scoped to the thread when there is one: a follow-up inside a
   // thread is about that thread, not about whatever else was said in the
   // channel.
-  const previousRows = await prisma.message.findMany({
-    where: {
-      conversationId: message.conversationId,
-      isDeleted: false,
-      ts: { lt: message.ts },
-      ...(message.userId ? { userId: message.userId } : {}),
-      ...(message.threadTs ? { threadTs: message.threadTs } : {}),
-    },
-    orderBy: [{ sentAt: 'desc' }, { ts: 'desc' }],
-    take: PREVIOUS_MESSAGE_WINDOW,
-    select: { id: true, text: true, sentAt: true },
+  const previousRaw = ((history.messages as RawSlackMessage[] | undefined) ?? [])
+    .filter((row) => Boolean(row.ts) && row.ts! < identity.ts)
+    .filter((row) => !message.userId || row.user === message.userId)
+    .sort((a, b) => a.ts!.localeCompare(b.ts!))
+    .slice(-PREVIOUS_MESSAGE_WINDOW);
+  const priorIdentities = await prisma.message.findMany({
+    where: { conversationId: identity.conversationId, ts: { in: previousRaw.map((row) => row.ts!) }, isDeleted: false },
+    select: { id: true, ts: true },
   });
-
-  const previous: PromptPreviousMessage[] = previousRows
-    .slice()
-    .reverse()
+  const idsByTs = new Map(priorIdentities.map((row) => [row.ts, row.id]));
+  const previous: PromptPreviousMessage[] = previousRaw
+    .filter((row) => idsByTs.has(row.ts!))
     .map((row) => ({
-      id: row.id,
-      text: renderSlackText(row.text, lookup.labels),
-      sentAtIso: row.sentAt.toISOString(),
+      id: idsByTs.get(row.ts!)!,
+      text: row.text ?? '',
+      sentAtIso: normalizeMessage(row, identity.conversationId).sentAt.toISOString(),
     }));
-
-  const kind = message.conversation.kind;
+  const kind = conversation.kind;
 
   return {
-    text: renderSlackText(message.text, lookup.labels),
-    senderLabel: senderLabel(
-      message.userId,
-      message.authorName,
-      message.botId,
-      lookup.users,
-    ),
-    contextLabel: contextLabelFor(message.conversation, lookup.users),
+    text: message.text,
+    senderLabel: user ? userDisplayLabel(user) : message.authorName ?? 'Unknown sender',
+    contextLabel: conversation.name ? `#${conversation.name}` : kind === 'IM' ? 'Direct message' : 'Group DM',
     isDirectMessage: kind === 'IM' || kind === 'MPIM',
     mentionsMe:
       lookup.authedUserId !== null &&
@@ -240,6 +218,7 @@ export async function loadClassificationContext(
     sentAtIso: message.sentAt.toISOString(),
     nowIso: now.toISOString(),
     previous,
+    sourceUpdatedAtIso: identity.updatedAt.toISOString(),
   };
 }
 
@@ -250,20 +229,27 @@ export async function loadClassificationContext(
 export async function saveClassification(
   messageId: string,
   result: ClassificationResult,
-): Promise<void> {
+  expectedUpdatedAt?: Date,
+): Promise<boolean> {
   const data = {
     urgencyScore: result.urgencyScore,
     category: toDbCategory(result.category),
     isBump: result.isBump,
     bumpOfMessageId: result.bumpOfMessageId,
-    reason: result.reason,
+    reasonCode: result.reasonCode,
     model: result.model,
   };
 
-  await prisma.classification.upsert({
-    where: { messageId },
-    create: { messageId, ...data },
-    update: data,
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "Message" WHERE id = ${messageId} FOR UPDATE`;
+    const message = await tx.message.findUnique({ where: { id: messageId }, select: { isDeleted: true, updatedAt: true } });
+    if (!message || message.isDeleted || (expectedUpdatedAt && message.updatedAt.getTime() !== expectedUpdatedAt.getTime())) return false;
+    await tx.classification.upsert({
+      where: { messageId },
+      create: { messageId, ...data },
+      update: data,
+    });
+    return true;
   });
 }
 
@@ -294,9 +280,7 @@ export type ClassifyBatchOptions = {
   onProgress?: (event: ClassifyProgress) => void;
 };
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+const SAFE_CLASSIFICATION_FAILURE = 'CLASSIFICATION_FAILED';
 
 /** Classify one already-selected message. Throws on failure. */
 export async function classifyOne(
@@ -321,8 +305,8 @@ export async function classifyOne(
     classifyMessage(context, { signal: options.signal }),
   );
 
-  await saveClassification(messageId, result);
-  return result;
+  const expectedUpdatedAt = context.sourceUpdatedAtIso ? new Date(context.sourceUpdatedAtIso) : undefined;
+  return (await saveClassification(messageId, result, expectedUpdatedAt)) ? result : null;
 }
 
 /**
@@ -350,6 +334,14 @@ export async function classifyPendingMessages(
     limit,
     authedUserId: lookup.authedUserId,
   });
+  if (ids.length > 0) {
+    const identities = await prisma.message.findMany({
+      where: { id: { in: ids }, isDeleted: false },
+      select: { id: true, conversationId: true, ts: true, threadTs: true, isDeleted: true, conversation: { select: { kind: true } } },
+    });
+    const slack = await getSlackContext();
+    await hydrateMessageBatch(slack.client, identities);
+  }
 
   const outcomes = await runPooled(ids, concurrency, async (messageId) => {
     if (signal?.aborted) {
@@ -388,7 +380,7 @@ export async function classifyPendingMessages(
     }
 
     const messageId = ids[index];
-    const error = describeError(outcome.error);
+    const error = SAFE_CLASSIFICATION_FAILURE;
     summary.failed += 1;
     summary.failures.push({ messageId, error });
     onProgress?.({ kind: 'failed', messageId, error });

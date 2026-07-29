@@ -63,6 +63,12 @@ export type QueueMessageRow = {
   hasFiles: boolean;
   reactions: QueueReaction[] | null;
   mentionedUserIds: string[];
+  /** Content-free routing fact persisted at ingestion time. */
+  mentionsAuthedUser: boolean;
+  /** Identifier-only row loaded solely to terminate a sender burst. */
+  isRoutingBoundary?: boolean;
+  /** Boundary read was truncated, so grouping cannot be proven safe. */
+  disableBurstGrouping?: boolean;
 
   conversation: QueueConversation;
 
@@ -297,7 +303,7 @@ export function queueReasonFor(
   row: QueueMessageRow,
   context: QueueContext,
 ): QueueReason | null {
-  if (row.isDeleted) return null;
+  if (row.isDeleted || row.isRoutingBoundary) return null;
   if (row.subtype !== null && HIDDEN_SUBTYPES.has(row.subtype)) return null;
 
   const { authedUserId } = context;
@@ -305,8 +311,8 @@ export function queueReasonFor(
 
   const kind = row.conversation.kind;
   const isDm = kind === 'IM' || kind === 'MPIM';
-  const mentionsMe =
-    authedUserId !== null && row.mentionedUserIds.includes(authedUserId);
+  const mentionsMe = row.mentionsAuthedUser ||
+    (authedUserId !== null && row.mentionedUserIds.includes(authedUserId));
   const inMyThread =
     row.threadTs !== null &&
     (context.participatingThreadKeys?.has(
@@ -340,7 +346,7 @@ function burstStreamKey(row: {
   conversationId: string;
   threadTs: string | null;
 }): string {
-  return `${row.conversationId} ${row.threadTs ?? 'root'}`;
+  return `${row.conversationId}:${row.threadTs ?? 'root'}`;
 }
 
 /** Who sent it, for run-boundary purposes. Bots without a user id count too. */
@@ -402,6 +408,13 @@ export function assignBurstKeys(
     if (row.subtype !== null && HIDDEN_SUBTYPES.has(row.subtype)) continue;
 
     const stream = burstStreamKey(row);
+
+    if (row.disableBurstGrouping) {
+      counter += 1;
+      keys.set(row.id, `${stream}#${counter}`);
+      runs.delete(stream);
+      continue;
+    }
 
     if (row.isThreadParent) {
       counter += 1;

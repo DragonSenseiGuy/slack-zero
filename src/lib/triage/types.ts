@@ -70,6 +70,12 @@ export const CATEGORY_LABEL: Record<TriageCategory, string> = {
   fyi: 'FYI',
 };
 
+export const REASON_CODE_LABEL: Record<MessageTriage['reasonCode'], string> = {
+  DIRECT_REQUEST: 'Direct request', QUESTION: 'Question', APPROVAL_NEEDED: 'Approval needed',
+  BLOCKED: 'Blocked', DEADLINE: 'Deadline', INCIDENT: 'Incident', FOLLOW_UP: 'Follow-up',
+  INFORMATIONAL: 'Informational', AUTOMATED_NOTICE: 'Automated notice', SOCIAL: 'Social', OTHER: 'Other',
+};
+
 /** Scores are 0-100 by contract; a model that ignores that gets clamped. */
 export function clampUrgency(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -114,7 +120,7 @@ export type MessageTriage = {
   isBump: boolean;
   /** The earlier message this one chases, when the model identified it. */
   bumpOfMessageId: string | null;
-  reason: string;
+  reasonCode: import('@/lib/triage/prompt').ClassificationReasonCode;
   /** Model that produced this, so a model change is visible in the data. */
   model: string;
   classifiedAtIso: string;

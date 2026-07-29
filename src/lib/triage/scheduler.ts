@@ -71,16 +71,12 @@ async function drain(): Promise<void> {
         log(
           result === null
             ? `classify skipped ${messageId} (gone or empty)`
-            : `classified ${messageId}: ${result.category} ${result.urgencyScore} — ${result.reason}`,
+            : `classified ${messageId}: ${result.category} ${result.urgencyScore} (${result.reasonCode})`,
         );
-      } catch (error) {
+      } catch {
         // Never rethrow: this runs detached from any request, so an unhandled
         // rejection here would take the socket listener down with it.
-        log(
-          `classify failed for ${messageId}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+        log(`CLASSIFICATION_FAILED message=${messageId}`);
         // Drop it rather than retrying in a tight loop. The row still has no
         // Classification, so the next `npm run classify` picks it up.
         lookup = null;
@@ -133,12 +129,8 @@ export function scheduleClassificationForSlackMessage(
     .then((message) => {
       if (message) scheduleClassification(message.id);
     })
-    .catch((error: unknown) => {
-      log(
-        `classify lookup failed for ${conversationId}@${ts}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+    .catch(() => {
+      log(`CLASSIFICATION_FAILED conversation=${conversationId} ts=${ts}`);
     });
 }
 

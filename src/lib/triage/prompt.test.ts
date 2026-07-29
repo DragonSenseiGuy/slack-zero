@@ -56,7 +56,7 @@ function reply(overrides: Record<string, unknown> = {}): string {
     urgency_score: 60,
     is_bump: false,
     bump_of: null,
-    reason: 'asks you to review the migration',
+    reason_code: 'DIRECT_REQUEST',
     ...overrides,
   });
 }
@@ -159,7 +159,7 @@ describe('parseClassificationResponse', () => {
       category: 'action_needed',
       isBump: false,
       bumpOfMessageId: null,
-      reason: 'asks you to review the migration',
+      reasonCode: 'DIRECT_REQUEST',
     });
   });
 
@@ -205,13 +205,9 @@ describe('parseClassificationResponse', () => {
     ).toBe(62);
   });
 
-  it('truncates an over-long reason instead of rejecting the result', () => {
-    const parsed = parseClassificationResponse(
-      reply({ reason: 'x'.repeat(500) }),
-      NO_PREVIOUS,
-    );
-    expect(parsed.reason).toHaveLength(300);
-    expect(parsed.reason.endsWith('...')).toBe(true);
+  it('rejects free-form reasoning and excerpts', () => {
+    expect(() => parseClassificationResponse(reply({ reason: 'private excerpt' }), NO_PREVIOUS)).toThrow();
+    expect(() => parseClassificationResponse(reply({ excerpt: 'private excerpt' }), NO_PREVIOUS)).toThrow();
   });
 });
 
@@ -235,31 +231,28 @@ describe('parseClassificationResponse rejects unusable output', () => {
   it('throws on an unknown category rather than guessing one', () => {
     expect(() =>
       parseClassificationResponse(reply({ category: 'urgent' }), NO_PREVIOUS),
-    ).toThrow(/unknown category/);
+    ).toThrow('CLASSIFICATION_UNKNOWN_CATEGORY');
   });
 
   it('throws when urgency_score is not a number', () => {
     expect(() =>
       parseClassificationResponse(reply({ urgency_score: 'high' }), NO_PREVIOUS),
-    ).toThrow(/urgency_score/);
+    ).toThrow('CLASSIFICATION_INVALID_URGENCY');
   });
 
-  it('throws when reason is missing — CLAUDE.md requires stored reasoning', () => {
-    expect(() =>
-      parseClassificationResponse(reply({ reason: '' }), NO_PREVIOUS),
-    ).toThrow(/reason is required/);
-    expect(() =>
-      parseClassificationResponse(reply({ reason: '   ' }), NO_PREVIOUS),
-    ).toThrow(/reason is required/);
+  it('throws on an unknown reason_code', () => {
+    expect(() => parseClassificationResponse(reply({ reason_code: 'PRIVATE_TEXT' }), NO_PREVIOUS)).toThrow('CLASSIFICATION_UNKNOWN_REASON_CODE');
   });
 
-  it('carries the raw response on the error so a failure is debuggable', () => {
+  it('does not retain the raw response on parse errors', () => {
+    const privateExcerpt = 'private customer text 7f3a';
     try {
-      parseClassificationResponse('not json', NO_PREVIOUS);
-      expect.unreachable('should have thrown');
+      parseClassificationResponse(privateExcerpt, NO_PREVIOUS);
+      expect.unreachable('should throw');
     } catch (error) {
       expect(error).toBeInstanceOf(ClassificationParseError);
-      expect((error as ClassificationParseError).raw).toBe('not json');
+      expect(String(error)).not.toContain(privateExcerpt);
+      expect(error).not.toHaveProperty('raw');
     }
   });
 });

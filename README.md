@@ -124,6 +124,14 @@ conversation id). `Esc` widens back out.
 
 ## Development
 
+### Privacy migration routing repair
+
+After deploying the privacy-first migrations, run `npm run backfill`. This is
+required for a local database that previously applied the early privacy
+migration (or any interrupted legacy rollout): Slack is re-read to repair only
+the persisted `isContent` and `mentionsAuthedUser` routing facts. Message
+content remains live-only and is never restored to Postgres.
+
 ```bash
 npm run test                  # unit tests (no network, no database)
 npm run test:e2e              # Playwright

@@ -73,11 +73,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // as part of connecting so the inbox is useful without a separate CLI
     // step. The backfill upserts on Slack ids, so reconnecting is safe.
     await runBackfill();
-  } catch (error) {
+  } catch {
     // OAuth itself succeeded and the token is already stored. Preserve that
     // result while making the history failure visible and retryable.
     backfillFailed = true;
-    console.error('Slack connected, but the initial history import failed:', error);
+    console.error('Slack connected, but the initial history import failed.');
   }
 
   const query = backfillFailed

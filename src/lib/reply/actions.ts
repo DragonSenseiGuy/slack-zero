@@ -9,7 +9,10 @@ import { generateDrafts } from '@/lib/reply/generate';
 import { replyTargetThreadTs, sendReply } from '@/lib/reply/send';
 import { describeSlackError } from '@/lib/slack/errors';
 import type { ReplyDraft } from '@/lib/reply/draft';
-import { getInstallation } from '@/lib/slack/installation';
+import { getSlackContext } from '@/lib/slack/client';
+import { hydrateConversation, hydrateExactMessage, hydrateHistory, hydrateUser } from '@/lib/slack/live';
+import { normalizeConversation, normalizeMessage, normalizeUser } from '@/lib/slack/normalize';
+import type { RawSlackMessage } from '@/lib/slack/raw';
 
 export type SendReplyResult =
   | {
@@ -44,8 +47,7 @@ export async function sendReplyToMessage(
         conversationId: true,
         ts: true,
         threadTs: true,
-        isThreadReply: true,
-        isThreadParent: true,
+        isDeleted: true,
       },
     });
   } catch (error) {
@@ -53,7 +55,7 @@ export async function sendReplyToMessage(
     return { ok: false, error: `Could not read the message: ${detail}` };
   }
 
-  if (!message) {
+  if (!message || message.isDeleted) {
     return { ok: false, error: 'That message no longer exists.' };
   }
 
@@ -125,76 +127,68 @@ export async function draftReplies(
       where: { id: messageId },
       select: {
         id: true,
-        text: true,
+        ts: true,
         sentAt: true,
         threadTs: true,
         conversationId: true,
-        user: { select: { displayName: true, realName: true, username: true } },
-        conversation: { select: { kind: true, name: true } },
+        userId: true,
       },
     });
 
     if (!message) return { ok: false, error: 'That message no longer exists.' };
 
-    const installation = await getInstallation();
-
-    const history = await prisma.message.findMany({
-      where: {
-        conversationId: message.conversationId,
-        sentAt: { lt: message.sentAt },
-        isDeleted: false,
-      },
-      orderBy: { sentAt: 'desc' },
-      take: 6,
-      select: {
-        text: true,
-        userId: true,
-        user: { select: { displayName: true, realName: true, username: true } },
-      },
-    });
+    const slack = await getSlackContext();
+    const [rawMessage, rawConversation, historyResponse] = await Promise.all([
+      hydrateExactMessage(slack.client, message.conversationId, message.ts),
+      hydrateConversation(slack.client, message.conversationId),
+      hydrateHistory(slack.client, message.conversationId, message.ts, 6),
+    ]);
+    if (!rawMessage) return { ok: false, error: 'That message is unavailable.' };
+    const liveMessage = normalizeMessage(rawMessage, message.conversationId);
+    const conversation = rawConversation ? normalizeConversation(rawConversation) : null;
+    const history = ((historyResponse.messages as RawSlackMessage[] | undefined) ?? [])
+      .map((raw) => normalizeMessage(raw, message.conversationId))
+      .reverse();
+    const userIds = [...new Set([liveMessage.userId, ...history.map((entry) => entry.userId)].filter((id): id is string => Boolean(id)))];
+    const userEntries = await Promise.all(userIds.map(async (id) => {
+      const raw = await hydrateUser(slack.client, id);
+      const user = raw ? normalizeUser(raw) : null;
+      return [id, user?.displayName || user?.realName || user?.username || 'them'] as const;
+    }));
+    const userLabels = new Map(userEntries);
 
     const users = new Map<string, string>();
     const channels = new Map<string, string>();
     const lookup = { users, channels };
 
     const senderLabel =
-      message.user?.displayName ||
-      message.user?.realName ||
-      message.user?.username ||
-      'them';
+      (liveMessage.userId ? userLabels.get(liveMessage.userId) : liveMessage.authorName) || 'them';
 
     const isDirectMessage =
-      message.conversation.kind === 'IM' || message.conversation.kind === 'MPIM';
+      conversation?.kind === 'IM' || conversation?.kind === 'MPIM';
 
     const result = await generateDrafts({
-      text: renderSlackText(message.text, lookup),
+      text: renderSlackText(liveMessage.text, lookup),
       senderLabel,
       selfLabel: 'me',
       contextLabel: isDirectMessage
         ? `DM · ${senderLabel}`
-        : `#${message.conversation.name ?? message.conversationId}`,
+        : `#${conversation?.name ?? message.conversationId}`,
       isDirectMessage,
       isThread: message.threadTs !== null,
-      sentAtIso: message.sentAt.toISOString(),
+      sentAtIso: liveMessage.sentAt.toISOString(),
       nowIso: new Date().toISOString(),
-      history: history
-        .slice()
-        .reverse()
-        .map((entry) => ({
+      history: history.map((entry) => ({
           author:
-            entry.userId && entry.userId === installation?.authedUserId
+            entry.userId && entry.userId === slack.authedUserId
               ? 'me'
-              : entry.user?.displayName ||
-                entry.user?.realName ||
-                entry.user?.username ||
-                'them',
+              : (entry.userId ? userLabels.get(entry.userId) : entry.authorName) || 'them',
           text: renderSlackText(entry.text, lookup),
         })),
     });
 
     return { ok: true, drafts: result.drafts, model: result.model };
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { ok: false, error: `Could not draft a reply: ${detail}` };
+  } catch {
+    return { ok: false, error: 'Could not draft a reply right now. Please try again.' };
   }
 }

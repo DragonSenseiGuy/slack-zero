@@ -1,6 +1,7 @@
 import type { SlackInstallation } from '@prisma/client';
 
 import { prisma } from '@/lib/db';
+import { decryptSlackToken, encryptSlackToken } from '@/lib/slack/token-crypto';
 
 /**
  * Persistence for the single Slack OAuth installation.
@@ -35,16 +36,14 @@ export async function saveInstallation(
     },
     create: {
       teamId: input.teamId,
-      teamName: input.teamName,
       authedUserId: input.authedUserId,
-      userAccessToken: input.userAccessToken,
-      botAccessToken: input.botAccessToken ?? null,
+      encryptedUserAccessToken: encryptSlackToken(input.userAccessToken),
+      encryptedBotAccessToken: input.botAccessToken ? encryptSlackToken(input.botAccessToken) : null,
       scopes: input.scopes,
     },
     update: {
-      teamName: input.teamName,
-      userAccessToken: input.userAccessToken,
-      botAccessToken: input.botAccessToken ?? null,
+      encryptedUserAccessToken: encryptSlackToken(input.userAccessToken),
+      encryptedBotAccessToken: input.botAccessToken ? encryptSlackToken(input.botAccessToken) : null,
       scopes: input.scopes,
     },
   });
@@ -78,12 +77,28 @@ export function toPublicInstallation(
 ): PublicInstallation {
   return {
     teamId: installation.teamId,
-    teamName: installation.teamName,
+    teamName: installation.teamId,
     authedUserId: installation.authedUserId,
     scopes: installation.scopes ? installation.scopes.split(',') : [],
-    hasBotToken: Boolean(installation.botAccessToken),
+    hasBotToken: Boolean(installation.encryptedBotAccessToken),
     installedAt: installation.installedAt.toISOString(),
     updatedAt: installation.updatedAt.toISOString(),
+  };
+}
+
+export type DecryptedInstallation = SlackInstallation & {
+  userAccessToken: string;
+  botAccessToken: string | null;
+};
+
+/** Server-only token boundary. Never return this shape from a route. */
+export function decryptInstallation(installation: SlackInstallation): DecryptedInstallation {
+  return {
+    ...installation,
+    userAccessToken: decryptSlackToken(installation.encryptedUserAccessToken),
+    botAccessToken: installation.encryptedBotAccessToken
+      ? decryptSlackToken(installation.encryptedBotAccessToken)
+      : null,
   };
 }
 

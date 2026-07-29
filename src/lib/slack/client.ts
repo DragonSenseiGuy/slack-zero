@@ -1,6 +1,6 @@
 import { WebClient, retryPolicies } from '@slack/web-api';
 
-import { getInstallation } from '@/lib/slack/installation';
+import { decryptInstallation, getInstallation } from '@/lib/slack/installation';
 
 export class SlackNotConnectedError extends Error {
   constructor() {
@@ -21,7 +21,8 @@ export async function getSlackContext(): Promise<SlackContext> {
   const installation = await getInstallation();
   if (!installation) throw new SlackNotConnectedError();
 
-  const client = new WebClient(installation.userAccessToken, {
+  const decrypted = decryptInstallation(installation);
+  const client = new WebClient(decrypted.userAccessToken, {
     retryConfig: retryPolicies.fiveRetriesInFiveMinutes,
     rejectRateLimitedCalls: false,
   });
@@ -30,6 +31,6 @@ export async function getSlackContext(): Promise<SlackContext> {
     client,
     authedUserId: installation.authedUserId,
     teamId: installation.teamId,
-    teamName: installation.teamName,
+    teamName: installation.teamId,
   };
 }

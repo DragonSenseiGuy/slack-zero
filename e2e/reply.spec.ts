@@ -214,14 +214,9 @@ test.describe('sending for real', () => {
     await expect(page.getByTestId('sent-reply')).toContainText(body);
 
     // ---- confirm it is really in Slack ----
-    const { WebClient } = await import('@slack/web-api');
-    const { getInstallation } = await import('../src/lib/slack/installation');
-    const installation = await getInstallation();
-    expect(installation).not.toBeNull();
-
-    const slack = new WebClient(
-      (installation as { userAccessToken: string }).userAccessToken,
-    );
+    const { getSlackContext } = await import('../src/lib/slack/client');
+    const installation = await getSlackContext();
+    const slack = installation.client;
     const history = await slack.conversations.history({
       channel: conversationId,
       limit: 20,

@@ -61,10 +61,12 @@ describe('parseEnv', () => {
       ...MINIMAL,
       SLACK_CLIENT_ID: '123.456',
       LLM_MODEL: 'google/gemini-2.5-flash',
+      SLACK_TOKEN_ENCRYPTION_KEY: 'synthetic-private-key',
     });
 
     expect(env.SLACK_CLIENT_ID).toBe('123.456');
     expect(env.LLM_MODEL).toBe('google/gemini-2.5-flash');
+    expect(env.SLACK_TOKEN_ENCRYPTION_KEY).toBeDefined();
   });
 });
 

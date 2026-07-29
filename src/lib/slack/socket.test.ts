@@ -19,7 +19,8 @@ const markMessageDeleted = vi.fn(async (): Promise<boolean> => true);
 const applyReactionEvent = vi.fn(async (): Promise<boolean> => true);
 
 // Hoisted above the imports by vitest, so `socket.ts` binds to these.
-vi.mock('@/lib/db', () => ({ prisma: {} }));
+const { classificationDeleteMany } = vi.hoisted(() => ({ classificationDeleteMany: vi.fn() }));
+vi.mock('@/lib/db', () => ({ prisma: { classification: { deleteMany: classificationDeleteMany } } }));
 vi.mock('@/lib/slack/ingest', () => ({
   upsertMessage: (...args: unknown[]) => upsertMessage(...(args as [])),
   markMessageDeleted: (...args: unknown[]) =>
@@ -32,6 +33,7 @@ beforeEach(() => {
   upsertMessage.mockClear().mockResolvedValue('created');
   markMessageDeleted.mockClear().mockResolvedValue(true);
   applyReactionEvent.mockClear().mockResolvedValue(true);
+  classificationDeleteMany.mockClear().mockResolvedValue({ count: 0 });
 });
 
 describe('handleMessageEvent', () => {
@@ -110,6 +112,8 @@ describe('handleMessageEvent', () => {
     expect(upsertMessage).toHaveBeenCalledWith(
       expect.objectContaining({ ts: '1.000100', isEdited: true }),
       'EVENT',
+      undefined,
+      { clearClassification: true },
     );
   });
 

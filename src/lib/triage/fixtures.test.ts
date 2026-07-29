@@ -38,7 +38,7 @@ type Scored = {
     category: string;
     urgencyScore: number;
     isBump: boolean;
-    reason: string;
+    reasonCode: string;
   };
 };
 
@@ -49,7 +49,10 @@ function score(fixture: LabeledMessage): Scored {
     );
   }
 
-  const parsed = parseClassificationResponse(fixture.recorded, {
+  const legacy = JSON.parse(fixture.recorded) as Record<string, unknown>;
+  delete legacy.reason;
+  legacy.reason_code = 'OTHER';
+  const parsed = parseClassificationResponse(JSON.stringify(legacy), {
     previous: fixture.context.previous,
   });
 
@@ -64,9 +67,16 @@ function score(fixture: LabeledMessage): Scored {
       category: parsed.category,
       urgencyScore: parsed.urgencyScore,
       isBump: parsed.isBump,
-      reason: parsed.reason,
+      reasonCode: parsed.reasonCode,
     },
   };
+}
+
+function privacySafeRecording(recorded: string): string {
+  const legacy = JSON.parse(recorded) as Record<string, unknown>;
+  delete legacy.reason;
+  legacy.reason_code = 'OTHER';
+  return JSON.stringify(legacy);
 }
 
 const scored = LABELED_MESSAGES.map(score);
@@ -116,26 +126,22 @@ describe('every recorded reply is parseable', () => {
     'parses %s',
     (_id, fixture) => {
       expect(() =>
-        parseClassificationResponse(fixture.recorded as string, {
+        parseClassificationResponse(privacySafeRecording(fixture.recorded as string), {
           previous: fixture.context.previous,
         }),
       ).not.toThrow();
     },
   );
 
-  it('always produces a non-empty reason', () => {
-    // CLAUDE.md requires reasoning be stored with every score. A blank one would
-    // have thrown in the parser, but assert it explicitly: this is the property
-    // that makes the sort arguable rather than a black box.
+  it('always produces a safe reason code', () => {
     for (const row of scored) {
-      expect(row.actual.reason.length, row.fixture.id).toBeGreaterThan(0);
+      expect(row.actual.reasonCode.length, row.fixture.id).toBeGreaterThan(0);
     }
   });
 
-  it('gives concrete reasons, not generic filler', () => {
-    const filler = /^(seems|looks|probably|maybe)\b/i;
+  it('does not retain free-form reasoning', () => {
     for (const row of scored) {
-      expect(filler.test(row.actual.reason), row.fixture.id).toBe(false);
+      expect(row.actual).not.toHaveProperty('reason');
     }
   });
 });
@@ -147,7 +153,7 @@ describe('classification accuracy on the unambiguous set', () => {
       .filter((row) => !row.categoryOk)
       .map(
         (row) =>
-          `${row.fixture.id}: expected ${row.fixture.expected.category}, got ${row.actual.category} ("${row.actual.reason}")`,
+          `${row.fixture.id}: expected ${row.fixture.expected.category}, got ${row.actual.category} (${row.actual.reasonCode})`,
       );
 
     expect(

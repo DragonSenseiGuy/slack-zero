@@ -40,6 +40,14 @@ RUN ./node_modules/.bin/esbuild scripts/backfill.ts \
   --external:@prisma/client \
   --external:@slack/web-api \
   --outfile=/app/backfill.cjs
+RUN ./node_modules/.bin/esbuild scripts/socket.ts \
+  --bundle \
+  --platform=node \
+  --format=cjs \
+  --external:@prisma/client \
+  --external:@slack/socket-mode \
+  --external:@slack/web-api \
+  --outfile=/app/socket.cjs
 
 
 FROM dependencies AS production-dependencies
@@ -47,7 +55,8 @@ FROM dependencies AS production-dependencies
 RUN npm prune --omit=dev --ignore-scripts \
   && npm pkg set \
     'scripts.db:privacy-prepare=node privacy-pre-migration.cjs' \
-    'scripts.backfill=node backfill.cjs'
+    'scripts.backfill=node backfill.cjs' \
+    'scripts.socket=node socket.cjs'
 
 
 FROM base AS runner
@@ -62,6 +71,7 @@ COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/privacy-pre-migration.cjs ./privacy-pre-migration.cjs
 COPY --from=builder /app/backfill.cjs ./backfill.cjs
+COPY --from=builder /app/socket.cjs ./socket.cjs
 COPY --from=production-dependencies /app/package.json ./package.json
 COPY --from=builder /app/next.config.mjs ./next.config.mjs
 

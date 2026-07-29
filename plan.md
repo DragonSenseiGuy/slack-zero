@@ -918,6 +918,28 @@ down to the connected workspace holding 8 trivial messages.
 
 ## Post-Phase-8 fixes
 
+### Import existing DMs when Slack connects (2026-07-29)
+**Status:** Done — callback tests, static checks, and live backfill verification
+pass.
+
+OAuth previously stored the Slack token but left a fresh database empty until
+the user discovered and ran `npm run backfill`. A successful OAuth callback now
+runs the existing idempotent backfill before redirecting, so past DMs, group
+DMs, mentions, and thread replies are present when the inbox is first opened.
+If importing history fails, the connection is preserved and the setup page
+shows a retryable warning instead of silently presenting an empty inbox.
+
+**Verification:**
+- `npm run test` → 610 tests / 25 files passed, including callback coverage for
+  both a successful import and a failed import after successful OAuth.
+- `npm run typecheck` and `npm run lint` pass.
+- Ran the backfill against BOOM, then `npm run backfill:verify`: Slack and
+  Postgres match for 15 users, 15 conversations (5 DMs), 14 DM messages, and 1
+  channel mention. Slack's unreadable Slackbot DM remains the one expected
+  `channel_not_found` skip.
+
+---
+
 ### One person, one row: same-sender bursts are a single task (2026-07-26)
 **Status:** Done — unit and e2e verification pass.
 

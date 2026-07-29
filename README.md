@@ -44,9 +44,13 @@ npm run dev:https             # https://localhost:3000
 
 Open <https://localhost:3000>, click through the certificate warning, and hit
 **Connect Slack**. Confirm all three checks are green at
-<https://localhost:3000/api/health>.
+<https://localhost:3000/api/health>. Connecting automatically imports your
+recent DMs, group DMs, mentions, and thread replies into the inbox.
 
-## Loading your messages
+## Refreshing your messages
+
+The initial history import runs automatically during Slack OAuth. These manual
+commands are useful to refresh or verify it later:
 
 ```bash
 npm run backfill              # pull recent DMs, mpims and mentions

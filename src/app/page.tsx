@@ -11,7 +11,11 @@ export const dynamic = 'force-dynamic';
 export default async function HomePage({
   searchParams,
 }: {
-  searchParams: { slack_error?: string; slack_connected?: string };
+  searchParams: {
+    slack_error?: string;
+    slack_connected?: string;
+    backfill_error?: string;
+  };
 }) {
   let installation: PublicInstallation | null = null;
   let dbError = false;
@@ -51,7 +55,15 @@ export default async function HomePage({
 
       {searchParams.slack_connected && installation ? (
         <p className="rounded border border-green-300 bg-green-50 p-3 text-sm text-green-800">
-          Slack connected.
+          Slack connected
+          {searchParams.backfill_error ? '.' : ' and past messages imported.'}
+        </p>
+      ) : null}
+
+      {searchParams.backfill_error ? (
+        <p className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          Past messages could not be imported. Check the server log, then retry
+          by reconnecting Slack or running <code>npm run backfill</code>.
         </p>
       ) : null}
 

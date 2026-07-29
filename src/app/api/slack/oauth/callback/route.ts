@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
 import { EnvValidationError, requireSlackEnv } from '@/lib/env';
+import { runBackfill } from '@/lib/slack/backfill';
 import { saveInstallation } from '@/lib/slack/installation';
 import { exchangeCodeForToken } from '@/lib/slack/oauth';
 import {
@@ -14,7 +15,7 @@ export const dynamic = 'force-dynamic';
  * GET /api/slack/oauth/callback
  *
  * Validates the CSRF state, exchanges the code for a user token, persists the
- * installation, and bounces back to `/`.
+ * installation, imports existing Slack history, and bounces back to `/`.
  *
  * Failures redirect to `/?slack_error=<code>` with a short machine-readable
  * code. Token values are never logged and never put in a URL.
@@ -66,8 +67,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   await saveInstallation(exchange.installation);
 
+  let backfillFailed = false;
+  try {
+    // A fresh local database has no Socket Mode history to render. Import it
+    // as part of connecting so the inbox is useful without a separate CLI
+    // step. The backfill upserts on Slack ids, so reconnecting is safe.
+    await runBackfill();
+  } catch (error) {
+    // OAuth itself succeeded and the token is already stored. Preserve that
+    // result while making the history failure visible and retryable.
+    backfillFailed = true;
+    console.error('Slack connected, but the initial history import failed:', error);
+  }
+
+  const query = backfillFailed
+    ? '/?slack_connected=1&backfill_error=1'
+    : '/?slack_connected=1';
   const response = NextResponse.redirect(
-    resolveUrl(request, '/?slack_connected=1', slack.appBaseUrl),
+    resolveUrl(request, query, slack.appBaseUrl),
   );
   clearStateCookie(response);
   return response;

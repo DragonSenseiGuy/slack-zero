@@ -16,9 +16,10 @@ import { GET } from './route';
  */
 
 // vi.hoisted so these exist before the hoisted vi.mock factories run.
-const { mockAccess, mockSaveInstallation } = vi.hoisted(() => ({
+const { mockAccess, mockSaveInstallation, mockRunBackfill } = vi.hoisted(() => ({
   mockAccess: vi.fn(),
   mockSaveInstallation: vi.fn(),
+  mockRunBackfill: vi.fn(),
 }));
 
 vi.mock('@slack/web-api', () => ({
@@ -29,6 +30,10 @@ vi.mock('@slack/web-api', () => ({
 
 vi.mock('@/lib/slack/installation', () => ({
   saveInstallation: mockSaveInstallation,
+}));
+
+vi.mock('@/lib/slack/backfill', () => ({
+  runBackfill: mockRunBackfill,
 }));
 
 const STATE_SECRET = 'unit-test-state-secret';
@@ -65,6 +70,8 @@ beforeEach(() => {
   mockAccess.mockReset();
   mockSaveInstallation.mockReset();
   mockSaveInstallation.mockResolvedValue({ id: 'inst_1' });
+  mockRunBackfill.mockReset();
+  mockRunBackfill.mockResolvedValue({ messages: { created: 3 } });
 });
 
 afterEach(() => {
@@ -104,7 +111,7 @@ function redirectParams(location: string | null): URLSearchParams {
 }
 
 describe('GET /api/slack/oauth/callback — success path', () => {
-  it('exchanges the code, persists the installation, and redirects home', async () => {
+  it('persists the installation, imports history, and redirects home', async () => {
     mockAccess.mockResolvedValue(SLACK_SUCCESS);
     const state = createState(STATE_SECRET);
 
@@ -126,6 +133,28 @@ describe('GET /api/slack/oauth/callback — success path', () => {
       botAccessToken: 'xoxb-fake-bot-token',
       scopes: 'im:history,im:read,chat:write',
     });
+    expect(mockRunBackfill).toHaveBeenCalledTimes(1);
+    expect(mockSaveInstallation.mock.invocationCallOrder[0]).toBeLessThan(
+      mockRunBackfill.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('keeps the connection and reports when the initial history import fails', async () => {
+    mockAccess.mockResolvedValue(SLACK_SUCCESS);
+    mockRunBackfill.mockRejectedValue(new Error('Slack unavailable'));
+    const state = createState(STATE_SECRET);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const response = await GET(
+      buildRequest({ code: 'slack-code', state, cookieState: state }),
+    );
+
+    const params = redirectParams(response.headers.get('location'));
+    expect(params.get('slack_connected')).toBe('1');
+    expect(params.get('backfill_error')).toBe('1');
+    expect(mockSaveInstallation).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledOnce();
+    consoleError.mockRestore();
   });
 
   it('sends the code and redirect_uri Slack expects', async () => {

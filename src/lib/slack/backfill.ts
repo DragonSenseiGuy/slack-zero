@@ -141,9 +141,25 @@ async function backfillHistory(
 
   try {
     const info = await client.conversations.info({ channel: conversationId });
-    lastRead = (info.channel as
-      | (RawSlackConversation & { last_read?: string })
-      | undefined)?.last_read;
+    const conversation = info.channel as RawSlackConversation | undefined;
+    lastRead = conversation?.last_read;
+    const latestTs = conversation?.latest?.ts;
+    const latestFromMe = conversation?.latest?.user === authedUserId;
+    const hasUnread = latestFromMe
+      ? false
+      : conversation?.unread_count !== undefined
+        ? conversation.unread_count > 0
+        : latestTs && lastRead
+          ? Number(latestTs) > Number(lastRead)
+          : undefined;
+
+    // `conversations.info` is Tier 3 and includes unread metadata for DMs.
+    // Screen here so the much tighter `conversations.history` method is called
+    // only for conversations that can actually add something to the inbox. A
+    // latest message from the authed user means that conversation was already
+    // answered, even when Slack leaves its unread_count above zero.
+    if (hasUnread === false) return { messages: unread, lastRead };
+
     const page = await client.conversations.history({
       channel: conversationId,
       limit: DM_BACKFILL_LIMIT,
@@ -356,7 +372,7 @@ export async function runBackfill(
 
   log(
     `dm history: ${stats.messages.created} new, ${stats.messages.updated} refreshed, ` +
-      `${stats.conversations.historyRead}/${direct.length} conversations read`,
+      `${stats.conversations.historyRead} unread conversations read`,
   );
 
   if (options.includeMentions !== false) {

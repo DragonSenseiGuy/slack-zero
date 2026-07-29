@@ -39,7 +39,13 @@ describe('runBackfill DM history', () => {
           channels: [{ id: 'D123', is_im: true, user: 'UPEER' }],
         }),
         info: vi.fn().mockResolvedValue({
-          channel: { id: 'D123', is_im: true, last_read: '2.000000' },
+          channel: {
+            id: 'D123',
+            is_im: true,
+            last_read: '2.000000',
+            latest: { ts: '4.000000' },
+            unread_count: 2,
+          },
         }),
         history: vi.fn().mockResolvedValue({
           messages: [
@@ -81,7 +87,13 @@ describe('runBackfill DM history', () => {
           channels: [{ id: 'D123', is_im: true, user: 'UPEER' }],
         }),
         info: vi.fn().mockResolvedValue({
-          channel: { id: 'D123', is_im: true, last_read: '4.000000' },
+          channel: {
+            id: 'D123',
+            is_im: true,
+            last_read: '4.000000',
+            latest: { ts: '4.000000' },
+            unread_count: 0,
+          },
         }),
         history: vi.fn().mockResolvedValue({
           messages: [{ ts: '4.000000', user: 'UPEER', text: 'read' }],
@@ -97,6 +109,40 @@ describe('runBackfill DM history', () => {
 
     await runBackfill({ includeMentions: false, includeThreads: false });
 
+    expect(client.conversations.history).not.toHaveBeenCalled();
+    expect(mocks.upsertMessage).not.toHaveBeenCalled();
+    expect(mocks.markConversationSynced).not.toHaveBeenCalled();
+  });
+
+  it('skips a nominally unread DM when the latest message is from me', async () => {
+    const client = {
+      users: { list: vi.fn().mockResolvedValue({ members: [] }) },
+      conversations: {
+        list: vi.fn().mockResolvedValue({
+          channels: [{ id: 'D123', is_im: true, user: 'UPEER' }],
+        }),
+        info: vi.fn().mockResolvedValue({
+          channel: {
+            id: 'D123',
+            is_im: true,
+            last_read: '0.000000',
+            latest: { ts: '4.000000', user: 'UME' },
+            unread_count: 15,
+          },
+        }),
+        history: vi.fn(),
+      },
+    };
+    mocks.getSlackContext.mockResolvedValue({
+      client,
+      authedUserId: 'UME',
+      teamId: 'T123',
+      teamName: 'Test',
+    });
+
+    await runBackfill({ includeMentions: false, includeThreads: false });
+
+    expect(client.conversations.history).not.toHaveBeenCalled();
     expect(mocks.upsertMessage).not.toHaveBeenCalled();
   });
 });

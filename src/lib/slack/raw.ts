@@ -80,6 +80,11 @@ export type RawSlackConversation = {
   readonly is_private?: boolean;
   readonly is_archived?: boolean;
   readonly is_member?: boolean;
+  /** Present on `conversations.info` for DMs despite being absent from the SDK type. */
+  readonly last_read?: string;
+  readonly latest?: RawSlackMessage;
+  readonly unread_count?: number;
+  readonly unread_count_display?: number;
   /** On an IM, the Slack id of the other party. */
   readonly user?: string;
   readonly context_team_id?: string;

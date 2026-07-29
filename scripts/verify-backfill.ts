@@ -66,7 +66,20 @@ async function main(): Promise<void> {
     if (!im.id) continue;
     try {
       const info = await slack.conversations.info({ channel: im.id });
-      const lastRead = info.channel?.last_read;
+      const channel = info.channel as
+        | (typeof info.channel & {
+            latest?: { user?: string };
+            unread_count?: number;
+          })
+        | undefined;
+      const lastRead = channel?.last_read;
+      if (
+        channel?.unread_count === 0 ||
+        channel?.latest?.user === context.authedUserId
+      ) {
+        console.log(`  ${im.id}: 0 unread messages`);
+        continue;
+      }
       const history = await slack.conversations.history({
         channel: im.id,
         limit: 10,

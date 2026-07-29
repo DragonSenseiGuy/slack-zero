@@ -1082,6 +1082,11 @@ live-only.
 
 **Updated 2026-07-29:** Backfill now asks Slack for each DM's `last_read`, reads
 at most the latest ten messages, and persists only those newer than that marker.
+It uses `conversations.info`'s `unread_count` to skip history entirely for read
+DMs, so one unread conversation produces one `conversations.history` call
+rather than one call for every DM the user has ever opened.
+Conversations whose latest message is from the authed user are skipped too:
+Slack can leave their `unread_count` above zero even though they were answered.
 The Socket Mode path still persists each new DM event as it arrives. In both
 cases, the context route above supplies ten preceding messages and another ten
 whenever the user scrolls upward, without requiring older messages to be

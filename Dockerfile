@@ -25,11 +25,20 @@ ENV DATABASE_URL=postgresql://build:build@localhost:5432/build
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
+# Bundle the one-time privacy preparation command so the production image can
+# run it without retaining tsx or the rest of the development dependencies.
+RUN ./node_modules/.bin/esbuild scripts/privacy-pre-migration.ts \
+  --bundle \
+  --platform=node \
+  --format=cjs \
+  --external:@prisma/client \
+  --outfile=/app/privacy-pre-migration.cjs
 
 
 FROM dependencies AS production-dependencies
 
-RUN npm prune --omit=dev --ignore-scripts
+RUN npm prune --omit=dev --ignore-scripts \
+  && npm pkg set 'scripts.db:privacy-prepare=node privacy-pre-migration.cjs'
 
 
 FROM base AS runner
@@ -42,7 +51,8 @@ ENV NODE_ENV=production \
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/privacy-pre-migration.cjs ./privacy-pre-migration.cjs
+COPY --from=production-dependencies /app/package.json ./package.json
 COPY --from=builder /app/next.config.mjs ./next.config.mjs
 
 USER node

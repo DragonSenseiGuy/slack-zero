@@ -37,7 +37,7 @@ FROM base AS runner
 ENV NODE_ENV=production \
   NEXT_TELEMETRY_DISABLED=1 \
   HOSTNAME=0.0.0.0 \
-  PORT=3000
+  PORT=7001
 
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
@@ -46,6 +46,6 @@ COPY --from=builder /app/next.config.mjs ./next.config.mjs
 
 USER node
 
-EXPOSE 3000
+EXPOSE 7001
 
 CMD ["npm", "run", "start"]

@@ -75,6 +75,13 @@ COPY --from=builder /app/socket.cjs ./socket.cjs
 COPY --from=production-dependencies /app/package.json ./package.json
 COPY --from=builder /app/next.config.mjs ./next.config.mjs
 
+# `.next` is copied in as root, so the runtime user cannot create
+# `.next/cache/...` — which flooded the logs with EACCES on every outbound call.
+# Nothing sensitive is expected here: all Slack and LLM traffic goes through
+# `noStoreFetch` (src/lib/http/no-store.ts), so Next writes no fetch-cache
+# entries at all, and every page is dynamic so there is no ISR output either.
+RUN mkdir -p .next/cache && chown -R node:node .next/cache
+
 USER node
 
 EXPOSE 7001

@@ -1,5 +1,7 @@
 import { WebClient, retryPolicies } from '@slack/web-api';
 
+import { noStoreFetch } from '@/lib/http/no-store';
+
 import { decryptInstallation, getInstallation } from '@/lib/slack/installation';
 
 export class SlackNotConnectedError extends Error {
@@ -25,6 +27,9 @@ export async function getSlackContext(): Promise<SlackContext> {
   const client = new WebClient(decrypted.userAccessToken, {
     retryConfig: retryPolicies.fiveRetriesInFiveMinutes,
     rejectRateLimitedCalls: false,
+    // Without this, Next writes every Slack response body to disk. See
+    // src/lib/http/no-store.ts.
+    fetch: noStoreFetch,
   });
 
   return {

@@ -1,5 +1,6 @@
 import { WebClient } from '@slack/web-api';
 
+import { noStoreFetch } from '@/lib/http/no-store';
 import type { SaveInstallationInput } from '@/lib/slack/installation';
 import {
   SLACK_BOT_SCOPE_STRING,
@@ -61,7 +62,9 @@ export type ExchangeCodeResult =
 export async function exchangeCodeForToken(
   options: ExchangeCodeOptions,
 ): Promise<ExchangeCodeResult> {
-  const client = new WebClient();
+  // The response body carries the plaintext user token; it must never reach
+  // Next's on-disk fetch cache. See src/lib/http/no-store.ts.
+  const client = new WebClient(undefined, { fetch: noStoreFetch });
 
   let response;
   try {

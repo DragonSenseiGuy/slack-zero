@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 
 import { getEnv, isLlmConfigured, requireLlmEnv } from '@/lib/env';
+import { noStoreFetch } from '@/lib/http/no-store';
 
 if (typeof window !== 'undefined') {
   throw new Error(
@@ -56,7 +57,7 @@ function getClient(): { openai: OpenAI; model: string } {
 
   const cacheKey = `${baseUrl}::${apiKey}`;
   if (!client || clientKey !== cacheKey) {
-    client = new OpenAI({ baseURL: baseUrl, apiKey });
+    client = new OpenAI({ baseURL: baseUrl, apiKey, fetch: noStoreFetch });
     clientKey = cacheKey;
   }
 

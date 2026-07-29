@@ -58,20 +58,25 @@ async function main(): Promise<void> {
     }),
   });
 
-  // --- Messages per DM ---------------------------------------------------
-  let dmMessages = 0;
+  // --- Unread messages per DM --------------------------------------------
+  const unreadDmKeys = new Set<string>();
   const unreadable: string[] = [];
 
   for (const im of ims) {
     if (!im.id) continue;
     try {
+      const info = await slack.conversations.info({ channel: im.id });
+      const lastRead = info.channel?.last_read;
       const history = await slack.conversations.history({
         channel: im.id,
-        limit: 1000,
+        limit: 10,
       });
-      const count = history.messages?.length ?? 0;
-      dmMessages += count;
-      console.log(`  ${im.id}: ${count} message(s) visible in Slack`);
+      const unread = (history.messages ?? []).filter(
+        (message) =>
+          message.ts && (!lastRead || Number(message.ts) > Number(lastRead)),
+      );
+      unread.forEach((message) => unreadDmKeys.add(`${im.id}:${message.ts}`));
+      console.log(`  ${im.id}: ${unread.length} unread message(s) in the latest 10`);
     } catch (error) {
       const code =
         typeof error === 'object' && error !== null
@@ -82,12 +87,24 @@ async function main(): Promise<void> {
     }
   }
 
+  const unreadDmIdentities = unreadDmKeys.size > 0
+    ? await prisma.message.findMany({
+        where: {
+          OR: [...unreadDmKeys].map((key) => {
+            const separator = key.indexOf(':');
+            return {
+              conversationId: key.slice(0, separator),
+              ts: key.slice(separator + 1),
+            };
+          }),
+        },
+        select: { conversationId: true, ts: true },
+      })
+    : [];
   rows.push({
-    what: 'messages in DMs/mpims',
-    slack: dmMessages,
-    db: await prisma.message.count({
-      where: { conversation: { kind: { in: ['IM', 'MPIM'] } } },
-    }),
+    what: 'recent unread DMs/mpims',
+    slack: unreadDmKeys.size,
+    db: unreadDmIdentities.length,
     note: unreadable.length > 0 ? `skipped: ${unreadable.join(', ')}` : undefined,
   });
 

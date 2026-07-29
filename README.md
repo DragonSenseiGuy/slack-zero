@@ -45,7 +45,8 @@ npm run dev:https             # https://localhost:3000
 Open <https://localhost:3000>, click through the certificate warning, and hit
 **Connect Slack**. Confirm all three checks are green at
 <https://localhost:3000/api/health>. Connecting automatically imports your
-recent DMs, group DMs, mentions, and thread replies into the inbox.
+up to ten unread messages per DM or group DM, plus mentions and relevant thread
+replies, into the inbox.
 
 ## Refreshing your messages
 
@@ -53,7 +54,7 @@ The initial history import runs automatically during Slack OAuth. These manual
 commands are useful to refresh or verify it later:
 
 ```bash
-npm run backfill              # pull recent DMs, mpims and mentions
+npm run backfill              # pull recent unread DMs/mpims and mentions
 npm run backfill:verify       # re-count against Slack, independently
 npm run classify              # classify anything not yet rated
 ```
@@ -112,7 +113,8 @@ conversation id). `Esc` widens back out.
   Ships with Needs Reply, Waiting Room, Everything, and Waiting on Others.
 - **Conversation context** — DMs and mentions open with the ten messages that
   came before, both halves of the exchange, and scroll further back for more.
-  Served from Postgres, so paging costs no Slack rate limit.
+  Older pages are fetched from Slack on demand and message content is never
+  persisted in Postgres.
 - **Reply without leaving the queue** — inline compose, optional AI drafts,
   auto-mark-as-complete.
 - **Snooze** — later today / tomorrow / next week / custom, waking early if the

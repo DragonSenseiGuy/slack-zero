@@ -48,14 +48,13 @@ export type BackfillStats = {
 };
 
 export type BackfillOptions = {
-  messagesPerConversation?: number;
   oldestTs?: string;
   includeMentions?: boolean;
   includeThreads?: boolean;
   onProgress?: (message: string) => void;
 };
 
-const DEFAULT_MESSAGES_PER_CONVERSATION = 500;
+const DM_BACKFILL_LIMIT = 10;
 const SLACK_PAGE_SIZE = 200;
 
 function slackErrorCode(error: unknown): string {
@@ -136,28 +135,26 @@ async function backfillHistory(
   authedUserId: string,
   stats: BackfillStats,
   options: BackfillOptions,
-): Promise<RawSlackMessage[]> {
-  const limit =
-    options.messagesPerConversation ?? DEFAULT_MESSAGES_PER_CONVERSATION;
-  const collected: RawSlackMessage[] = [];
-  let cursor: string | undefined;
+): Promise<{ messages: RawSlackMessage[]; lastRead?: string }> {
+  const unread: RawSlackMessage[] = [];
+  let lastRead: string | undefined;
 
   try {
-    do {
-      const page = await client.conversations.history({
-        channel: conversationId,
-        limit: Math.min(SLACK_PAGE_SIZE, limit - collected.length),
-        cursor,
-        oldest: options.oldestTs,
-      });
+    const info = await client.conversations.info({ channel: conversationId });
+    lastRead = (info.channel as
+      | (RawSlackConversation & { last_read?: string })
+      | undefined)?.last_read;
+    const page = await client.conversations.history({
+      channel: conversationId,
+      limit: DM_BACKFILL_LIMIT,
+      oldest: options.oldestTs,
+    });
 
-      for (const raw of page.messages ?? []) {
-        collected.push(raw);
-        await ingestOne(raw, conversationId, stats, authedUserId);
-      }
-
-      cursor = page.response_metadata?.next_cursor || undefined;
-    } while (cursor && collected.length < limit);
+    for (const raw of page.messages ?? []) {
+      if (!raw.ts || (lastRead && Number(raw.ts) <= Number(lastRead))) continue;
+      unread.push(raw);
+      await ingestOne(raw, conversationId, stats, authedUserId);
+    }
 
     await markConversationSynced(conversationId);
     stats.conversations.historyRead += 1;
@@ -168,7 +165,7 @@ async function backfillHistory(
     });
   }
 
-  return collected;
+  return { messages: unread, lastRead };
 }
 
 async function ingestOne(
@@ -256,7 +253,7 @@ async function fetchSingleMessage(
 
 async function backfillThreads(
   client: WebClient,
-  parents: Array<{ conversationId: string; ts: string }>,
+  parents: Array<{ conversationId: string; ts: string; oldestTs?: string }>,
   stats: BackfillStats,
   authedUserId: string,
   log: (message: string) => void,
@@ -270,6 +267,7 @@ async function backfillThreads(
         const page = await client.conversations.replies({
           channel: parent.conversationId,
           ts: parent.ts,
+          oldest: parent.oldestTs,
           limit: SLACK_PAGE_SIZE,
           cursor,
         });
@@ -331,19 +329,27 @@ export async function runBackfill(
       conversation.kind === 'IM' || conversation.kind === 'MPIM',
   );
 
-  const threadParents: Array<{ conversationId: string; ts: string }> = [];
+  const threadParents: Array<{
+    conversationId: string;
+    ts: string;
+    oldestTs?: string;
+  }> = [];
 
   for (const conversation of direct) {
-    const messages = await backfillHistory(
+    const history = await backfillHistory(
       client,
       conversation.id,
       authedUserId,
       stats,
       options,
     );
-    for (const raw of messages) {
+    for (const raw of history.messages) {
       if (raw.thread_ts && raw.thread_ts === raw.ts && (raw.reply_count ?? 0) > 0) {
-        threadParents.push({ conversationId: conversation.id, ts: raw.ts });
+        threadParents.push({
+          conversationId: conversation.id,
+          ts: raw.ts,
+          oldestTs: history.lastRead,
+        });
       }
     }
   }

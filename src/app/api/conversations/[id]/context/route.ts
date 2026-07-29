@@ -9,9 +9,9 @@ import { loadConversationContext } from '@/lib/queue/load';
  *
  * A route rather than a server action because this is a read the client drives:
  * it fires on selection and again each time the user scrolls further back, and
- * paging state belongs to the component, not to a page render. Nothing here
- * touches Slack — it is served entirely from what ingestion already stored, so
- * scrolling back through a conversation costs no Slack rate limit.
+ * paging state belongs to the component, not to a page render. History is read
+ * from Slack on demand, so backfill only needs to retain queue identities for
+ * unread messages rather than copying an entire conversation into Postgres.
  */
 
 export const dynamic = 'force-dynamic';

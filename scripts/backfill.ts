@@ -1,12 +1,12 @@
 /**
  * Backfill runner: `npm run backfill`
  *
- * Pulls the authed user's DMs, group DMs, and channel mentions into Postgres.
+ * Pulls up to ten unread messages from each of the authed user's DMs and group
+ * DMs, plus channel mentions, into Postgres.
  * Safe to re-run — every write is an upsert keyed on Slack's own ids, so a
  * second run reports "refreshed" rather than creating duplicates.
  *
  * Flags:
- *   --limit <n>     max messages per conversation (default 500)
  *   --oldest <ts>   only fetch messages newer than this Slack ts
  *   --no-mentions   skip the search.messages pass
  *   --no-threads    skip the conversations.replies pass
@@ -22,9 +22,6 @@ function parseArgs(argv: string[]): BackfillOptions & { json: boolean } {
 
   for (let i = 0; i < argv.length; i += 1) {
     switch (argv[i]) {
-      case '--limit':
-        options.messagesPerConversation = Number(argv[++i]);
-        break;
       case '--oldest':
         options.oldestTs = argv[++i];
         break;

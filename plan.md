@@ -1076,8 +1076,16 @@ Paging is by `ts` cursor, not offset: backfill inserts history *underneath* a
 reading position routinely, and an offset would then skip or repeat messages.
 `hasMore` comes from over-fetching one row rather than a second `COUNT`. It is
 a route (`/api/conversations/[id]/context`) rather than a server action because
-the client drives the paging state, and it reads only from Postgres — scrolling
-back through a year of a conversation costs no Slack rate limit.
+the client drives the paging state. Since the privacy migration, each page is
+read from Slack on demand rather than from Postgres, so message content remains
+live-only.
+
+**Updated 2026-07-29:** Backfill now asks Slack for each DM's `last_read`, reads
+at most the latest ten messages, and persists only those newer than that marker.
+The Socket Mode path still persists each new DM event as it arrives. In both
+cases, the context route above supplies ten preceding messages and another ten
+whenever the user scrolls upward, without requiring older messages to be
+backfilled.
 
 **3. Mentions show context too.** Same component, same route: a mention is the
 same problem in a channel. Threads deliberately do *not* get one — they already

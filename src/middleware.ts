@@ -25,6 +25,10 @@ const PUBLIC_PATHS = new Set([
   '/api/slack/oauth/start',
   '/api/slack/oauth/callback',
   '/api/auth/signout',
+  // Demo sign-in. Public by necessity — it is how an anonymous visitor gets a
+  // session at all — and harmless: the route itself refuses unless demo mode
+  // is on and the database has no real installation (src/lib/demo/guard.ts).
+  '/api/demo/signin',
 ]);
 
 export function middleware(request: NextRequest): NextResponse {

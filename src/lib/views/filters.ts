@@ -198,6 +198,12 @@ export function matchesViewFilters(
 
   if (filters.waitingOnly && !item.isWaitingOn) return false;
 
+  // Messages you sent enter the queue only as outstanding asks (see
+  // `QueueReason`). They belong in a view that asked to see what you are
+  // waiting on, and nowhere else — an unfiltered inbox showing your own
+  // messages back to you is not an inbox.
+  if (item.reason === 'waiting' && !filters.waitingOnly) return false;
+
   if (!matchesScope(item, filters.scope)) return false;
 
   if (filters.vipOnly && !item.isVipSender) return false;

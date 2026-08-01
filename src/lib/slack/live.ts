@@ -3,6 +3,7 @@ import type { WebClient } from '@slack/web-api';
 import { prisma } from '@/lib/db';
 import { messageCacheKey, slackConversationCache, slackMessageCache, slackUserCache } from '@/lib/slack/cache';
 import type { RawSlackConversation, RawSlackMessage, RawSlackUser } from '@/lib/slack/raw';
+import { syntheticWorkspaceFor, syntheticWorkspaceForUser, type SyntheticWorkspace } from '@/lib/slack/synthetic';
 
 const pending = new Map<string, Promise<unknown>>();
 export const SLACK_HYDRATION_CONCURRENCY = 4;
@@ -46,44 +47,24 @@ export async function mapWithConcurrency<T, R>(
   return results;
 }
 
-const E2E_CHANNEL = 'CE2ESEED001';
-const E2E_DM = 'DE2ESEED001';
-const E2E_SENDER = 'UE2ESEED001';
-const E2E_BYSTANDER = 'UE2EGAP0001';
-const E2E_MESSAGES: Record<string, string> = {
-  ...Object.fromEntries(['alpha — first fixture message', 'bravo — second fixture message', 'charlie — third fixture message', 'delta — fourth fixture message', 'echo — fifth fixture message', 'foxtrot — sixth fixture message'].map((text, index) => [`me2e-msg-${index}`, `E2E ${text}`])),
-  ...Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`me2e-gap-${index}`, `E2E bystander chatter ${index + 1}`])),
-  'me2e-thread-parent': 'E2E golf — thread parent',
-  'me2e-thread-reply-0': 'E2E thread reply one',
-  'me2e-thread-reply-1': 'E2E thread reply two',
-  'me2e-burst-gap': 'E2E bystander chatter burst gap',
-  'me2e-burst-0': 'E2E burst one — hey, are you around?',
-  'me2e-burst-1': 'E2E burst two — following up on the migration',
-  'me2e-burst-2': 'E2E burst three — need this before the release',
-  'me2e-late': 'E2E hotel — arrived after the page loaded',
-  ...Object.fromEntries(['one — did the migration land?', 'two — not yet, reviewing it now', 'three — any blockers?', 'four — just the index rebuild', 'five — how long does that take?', 'six — twenty minutes or so', 'seven — fine, ship it after', 'eight — will do', 'nine — thanks', 'ten — no problem', 'eleven — one more thing', 'twelve — go on', 'thirteen — sounds good, go ahead'].map((text, index) => [`me2e-dm-${index}`, `E2E dm ${text}`])),
-};
-
 type SyntheticIdentity = { id: string; ts: string; threadTs: string | null; userId: string | null; isDeleted: boolean };
 
-function e2eEnabled(): boolean { return process.env.SLACKZERO_E2E === '1'; }
-function isE2eConversation(id: string): boolean { return id === E2E_CHANNEL || id === E2E_DM; }
-
-async function syntheticMessage(conversationId: string, identity: SyntheticIdentity): Promise<RawSlackMessage | null> {
+/**
+ * Render a message whose text does not come from Slack — the e2e fixtures, or
+ * demo mode. See src/lib/slack/synthetic.ts for why either exists; when no
+ * stand-in is active every branch guarding this function is false and the only
+ * path is the live one.
+ */
+async function syntheticMessage(workspace: SyntheticWorkspace, conversationId: string, identity: SyntheticIdentity): Promise<RawSlackMessage | null> {
   if (identity.isDeleted) return null;
-  const fixtureText = E2E_MESSAGES[identity.id];
+  const fixtureText = workspace.messageText[identity.id];
   if (!fixtureText) return null;
   let text = fixtureText;
-  const mentions =
-    conversationId === E2E_CHANNEL &&
-    (/^me2e-msg-\d+$|^me2e-burst-\d+$|^me2e-thread-parent$|^me2e-late$/.test(
-      identity.id,
-    ));
-  if (mentions) {
-    const installation = await prisma.slackInstallation.findFirst({ orderBy: { updatedAt: 'desc' }, select: { authedUserId: true } });
-    if (installation) text = `<@${installation.authedUserId}> ${text}`;
+  if (workspace.mentionsOwner(conversationId, identity.id)) {
+    const ownerUserId = await workspace.ownerUserId();
+    if (ownerUserId) text = `<@${ownerUserId}> ${text}`;
   }
-  const replyCount = identity.id === 'me2e-thread-parent' ? 2 : undefined;
+  const replyCount = workspace.replyCount(identity.id);
   return { type: 'message', ts: identity.ts, text, user: identity.userId ?? undefined, thread_ts: identity.threadTs ?? undefined, reply_count: replyCount };
 }
 
@@ -111,8 +92,9 @@ export async function hydrateExactMessage(client: WebClient, conversationId: str
   return dedupe(`message:${key}`, async () => {
     const current = await prisma.message.findUnique({ where: { conversationId_ts: { conversationId, ts } }, select: { id: true, ts: true, threadTs: true, userId: true, isDeleted: true, updatedAt: true } });
     if (!current || current.isDeleted) return null;
-    if (e2eEnabled() && isE2eConversation(conversationId) && current) {
-      const message = await syntheticMessage(conversationId, current);
+    const synthetic = syntheticWorkspaceFor(conversationId);
+    if (synthetic && current) {
+      const message = await syntheticMessage(synthetic, conversationId, current);
       if (message) slackMessageCache.set(key, { raw: message, revisionMs: current.updatedAt.getTime() });
       return message;
     }
@@ -155,7 +137,7 @@ export async function hydrateMessageBatch(
   const threadGroups = new Map<string, MessageHydrationIdentity[]>();
   const exact: MessageHydrationIdentity[] = [];
   for (const row of requested) {
-    if (e2eEnabled() && isE2eConversation(row.conversationId)) {
+    if (syntheticWorkspaceFor(row.conversationId)) {
       exact.push(row);
     } else if (row.threadTs && row.threadTs !== row.ts) {
       const key = `${row.conversationId}:${row.threadTs}`;
@@ -226,18 +208,20 @@ export async function hydrateMessageBatch(
 }
 
 export async function hydrateHistory(client: WebClient, conversationId: string, before: string, limit: number, budget?: SlackRequestBudget) {
-  if (e2eEnabled() && isE2eConversation(conversationId)) {
+  const synthetic = syntheticWorkspaceFor(conversationId);
+  if (synthetic) {
     const identities = await prisma.message.findMany({ where: { conversationId, ts: { lt: before }, isDeleted: false }, orderBy: { sentAt: 'desc' }, take: limit, select: { id: true, ts: true, threadTs: true, userId: true, isDeleted: true } });
-    return { messages: (await Promise.all(identities.map((identity) => syntheticMessage(conversationId, identity)))).filter(Boolean) };
+    return { messages: (await Promise.all(identities.map((identity) => syntheticMessage(synthetic, conversationId, identity)))).filter(Boolean) };
   }
   if (!spend(budget)) return { messages: [], unavailable: true };
   return client.conversations.history({ channel: conversationId, latest: before, inclusive: false, limit });
 }
 
 export async function hydrateThread(client: WebClient, conversationId: string, threadTs: string, budget?: SlackRequestBudget) {
-  if (e2eEnabled() && conversationId === E2E_CHANNEL) {
+  const synthetic = syntheticWorkspaceFor(conversationId);
+  if (synthetic?.threadedConversationIds.has(conversationId)) {
     const identities = await prisma.message.findMany({ where: { conversationId, threadTs, isDeleted: false }, orderBy: { sentAt: 'asc' }, select: { id: true, ts: true, threadTs: true, userId: true, isDeleted: true } });
-    return { messages: (await Promise.all(identities.map((identity) => syntheticMessage(conversationId, identity)))).filter(Boolean) };
+    return { messages: (await Promise.all(identities.map((identity) => syntheticMessage(synthetic, conversationId, identity)))).filter(Boolean) };
   }
   if (!spend(budget)) return { messages: [], unavailable: true };
   return client.conversations.replies({ channel: conversationId, ts: threadTs });
@@ -247,9 +231,11 @@ export async function hydrateUser(client: WebClient, userId: string, budget?: Sl
   const cached = slackUserCache.get(userId) as RawSlackUser | undefined;
   if (cached) return cached;
   return dedupe(`user:${userId}`, async () => {
-    if (e2eEnabled() && (userId === E2E_SENDER || userId === E2E_BYSTANDER)) {
+    const synthetic = syntheticWorkspaceForUser(userId);
+    if (synthetic) {
       const exists = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
-      const user = exists ? { id: userId, name: userId === E2E_SENDER ? 'e2e-fixture-sender' : 'e2e-bystander', profile: { display_name: userId === E2E_SENDER ? 'E2E Fixture Sender' : 'E2E Bystander' } } : null;
+      const profile = synthetic.users[userId];
+      const user = exists ? { id: userId, name: profile.name, profile: { display_name: profile.displayName } } : null;
       if (user) slackUserCache.set(userId, user);
       return user;
     }
@@ -265,9 +251,11 @@ export async function hydrateConversation(client: WebClient, conversationId: str
   const cached = slackConversationCache.get(conversationId) as RawSlackConversation | undefined;
   if (cached) return cached;
   return dedupe(`conversation:${conversationId}`, async () => {
-    if (e2eEnabled() && isE2eConversation(conversationId)) {
+    const synthetic = syntheticWorkspaceFor(conversationId);
+    if (synthetic) {
       const conversation = await prisma.conversation.findUnique({ where: { id: conversationId }, select: { id: true, peerUserId: true } });
-      const raw = conversation ? (conversationId === E2E_CHANNEL ? { id: conversationId, name: 'e2e-seed', is_channel: true } : { id: conversationId, is_im: true, user: conversation.peerUserId ?? undefined }) : null;
+      const name = synthetic.channelNames[conversationId];
+      const raw = conversation ? (name ? { id: conversationId, name, is_channel: true } : { id: conversationId, is_im: true, user: conversation.peerUserId ?? undefined }) : null;
       if (raw) slackConversationCache.set(conversationId, raw);
       return raw;
     }

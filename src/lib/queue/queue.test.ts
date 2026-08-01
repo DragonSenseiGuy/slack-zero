@@ -153,6 +153,14 @@ describe('queueReasonFor', () => {
     expect(queueReasonFor(row({ userId: ME }), context)).toBeNull();
   });
 
+  it('keeps one exception: an unanswered ask the user sent', () => {
+    // Without this, "Waiting on Others" is structurally empty — the state is
+    // written onto the message *you* sent, which nothing else lets through.
+    expect(
+      queueReasonFor(row({ userId: ME, isWaitingOn: true }), context),
+    ).toBe('waiting');
+  });
+
   it('excludes soft-deleted messages', () => {
     expect(queueReasonFor(row({ isDeleted: true }), context)).toBeNull();
   });

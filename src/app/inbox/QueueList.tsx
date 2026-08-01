@@ -16,12 +16,15 @@ const REASON_LABEL: Record<QueueReason, string> = {
   dm: 'DM',
   mention: 'Mention',
   thread: 'Thread',
+  // Your own unanswered ask, shown only in a waiting-on view.
+  waiting: 'You asked',
 };
 
 const REASON_CLASS: Record<QueueReason, string> = {
   dm: 'bg-violet-100 text-violet-800',
   mention: 'bg-amber-100 text-amber-900',
   thread: 'bg-sky-100 text-sky-800',
+  waiting: 'bg-neutral-200 text-neutral-700',
 };
 
 export type QueueListProps = {

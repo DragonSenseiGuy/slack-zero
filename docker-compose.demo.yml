@@ -1,0 +1,59 @@
+# SlackZero, demo mode, in one command:
+#
+#   docker compose -f docker-compose.demo.yml up --build
+#
+# Then open http://localhost:7001 and click "Enter the demo".
+#
+# No Slack app, no tokens, no Node install — the app runs against a seeded fake
+# workspace and never contacts Slack. See src/lib/demo/workspace.ts for what is
+# in it, and README.md ("Demo mode") for what it deliberately cannot do.
+#
+# The demo database is its own volume and its own database name: demo mode
+# refuses to run anywhere a real Slack installation is stored.
+
+# Its own compose project, so this never adopts, recreates or removes the
+# development stack's containers in docker-compose.yml.
+name: slackzero-demo
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: slackzero-demo-postgres
+    environment:
+      POSTGRES_USER: slackzero
+      POSTGRES_PASSWORD: slackzero
+      POSTGRES_DB: slackzero_demo
+    volumes:
+      - slackzero-demo-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slackzero -d slackzero_demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    container_name: slackzero-demo
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://slackzero:slackzero@postgres:5432/slackzero_demo
+      SLACKZERO_DEMO: "1"
+      # Signs the demo session cookie. Fixed here on purpose — there is nothing
+      # to protect: the only thing this session can reach is fiction. Never
+      # reuse it on a connected install.
+      SLACK_STATE_SECRET: slackzero-demo-session-secret
+      APP_BASE_URL: http://localhost:7001
+    # Migrate, seed, serve. The seeder is idempotent and refuses to run on a
+    # database that has a real installation, so a restart just refreshes the
+    # relative timestamps.
+    command: >
+      sh -c "npx prisma migrate deploy &&
+             node demo-seed.cjs &&
+             npm run start"
+    ports:
+      - "7001:7001"
+
+volumes:
+  slackzero-demo-pgdata:

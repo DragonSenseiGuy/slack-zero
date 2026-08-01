@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db';
+import { isDemoMode } from '@/lib/demo/workspace';
 import { getInstallation } from '@/lib/slack/installation';
 import {
   currentStreak,
@@ -101,7 +102,10 @@ export async function loadStats(): Promise<StatsData> {
   const series = dailySeries(rows, 14, now);
 
   return {
-    isConnected: installation !== null,
+    // Demo mode has no installation and never will — but it does have data,
+    // so telling the visitor "nothing to measure yet" would be a lie about
+    // the numbers directly below it.
+    isConnected: installation !== null || isDemoMode(),
     today: summarize(rows, 'day', now),
     week: summarize(rows, 'week', now),
     series,

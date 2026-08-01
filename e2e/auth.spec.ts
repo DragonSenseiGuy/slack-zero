@@ -38,6 +38,21 @@ test.describe('signed out', () => {
     expect(stream.status()).toBe(401);
   });
 
+  test('demo sign-in is refused on a connected install', async ({ request }) => {
+    // Demo mode mints a session without Slack. On a database that holds a real
+    // installation — which is what this suite runs against — that route must
+    // be a dead end no matter what the environment says.
+    const response = await request.post('/api/demo/signin');
+
+    expect(response.status()).toBe(404);
+    expect((await response.json()).error).toBe('demo_unavailable');
+    expect(response.headers()['set-cookie']).toBeUndefined();
+
+    await request.get('/inbox');
+    const stillOut = await request.get('/api/inbox/stream');
+    expect(stillOut.status()).toBe(401);
+  });
+
   test('/api/health stays up but names neither user nor workspace', async ({
     request,
   }) => {

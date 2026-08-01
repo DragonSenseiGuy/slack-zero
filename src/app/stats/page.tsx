@@ -109,7 +109,10 @@ function Sparkline({ series }: { series: DailyPoint[] }) {
           return (
             <li
               key={point.date}
-              className="flex min-w-0 flex-1 flex-col justify-end"
+              // `h-full` is load-bearing: the bar's height is a percentage,
+              // and without a parent of known height it resolves against
+              // content — which is nothing, so every bar rendered at 0px.
+              className="flex h-full min-w-0 flex-1 flex-col justify-end"
               data-testid="stats-series-day"
               data-date={point.date}
               data-triaged={point.triaged}

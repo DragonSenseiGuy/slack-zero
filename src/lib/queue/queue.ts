@@ -13,8 +13,15 @@ export type QueueConversationKind =
   | 'PUBLIC_CHANNEL'
   | 'UNKNOWN';
 
-/** Why a message is in the queue at all. Shown as a badge on the row. */
-export type QueueReason = 'dm' | 'mention' | 'thread';
+/**
+ * Why a message is in the queue at all. Shown as a badge on the row.
+ *
+ * `waiting` is the odd one out: it is a message *the user sent* that nobody
+ * has answered. Those are excluded from the queue by every other rule — your
+ * own messages are not things to triage — so they surface only under a view
+ * that asks for them (`waitingOnly`), which `matchesFilters` enforces.
+ */
+export type QueueReason = 'dm' | 'mention' | 'thread' | 'waiting';
 
 export type QueueReaction = {
   name: string;
@@ -307,7 +314,14 @@ export function queueReasonFor(
   if (row.subtype !== null && HIDDEN_SUBTYPES.has(row.subtype)) return null;
 
   const { authedUserId } = context;
-  if (authedUserId !== null && row.userId === authedUserId) return null;
+  if (authedUserId !== null && row.userId === authedUserId) {
+    // Your own messages are not triage material — with one exception. An ask
+    // you sent that nobody answered is exactly what "Waiting on Others" is
+    // for, and returning null here meant that view could never show anything
+    // on any install (found while building the demo workspace, 2026-07-31).
+    // `matchesFilters` keeps these out of every view that did not ask.
+    return row.isWaitingOn ? 'waiting' : null;
+  }
 
   const kind = row.conversation.kind;
   const isDm = kind === 'IM' || kind === 'MPIM';

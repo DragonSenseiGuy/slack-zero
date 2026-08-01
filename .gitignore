@@ -49,3 +49,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 e2e/.auth/
+
+# release artifacts produced by `npm run package:release`
+/dist/

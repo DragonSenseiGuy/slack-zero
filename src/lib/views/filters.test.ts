@@ -500,6 +500,24 @@ describe('BUILT_IN_VIEWS', () => {
     ).toEqual([doneButWaiting.id]);
   });
 
+  it('"Waiting on Others" is the only view that shows what you sent', () => {
+    const waiting = BUILT_IN_VIEWS.find((v) => v.name === 'Waiting on Others');
+    const everything = BUILT_IN_VIEWS.find((v) => v.name === 'Everything');
+    const yourAsk = item({
+      reason: 'waiting' as QueueReason,
+      isWaitingOn: true,
+    });
+    const inbound = item();
+
+    expect(ids(applyViewFilters([yourAsk, inbound], waiting!.filters))).toEqual([
+      yourAsk.id,
+    ]);
+    // An inbox that shows your own messages back to you is not an inbox.
+    expect(ids(applyViewFilters([yourAsk, inbound], everything!.filters))).toEqual([
+      inbound.id,
+    ]);
+  });
+
   it('uses only valid layouts, sorts and filters', () => {
     for (const view of BUILT_IN_VIEWS) {
       expect(VIEW_LAYOUTS).toContain(view.layout);

@@ -122,6 +122,48 @@ async function directories(client: Awaited<ReturnType<typeof getSlackContext>>['
   return { conversations, users };
 }
 
+/**
+ * Resolve `<@U…>` mentions of people who did not author any loaded message.
+ *
+ * `directories()` hydrates senders, because those are the rows it can see. A
+ * mention of anyone else — including the user themselves, in a channel where
+ * they have not spoken — was left with no profile, and rendered as the raw
+ * Slack id in the transcript ("@U0BK9FR4Y1M nightly build failed"). Found
+ * while screenshotting the demo, 2026-07-31.
+ */
+async function hydrateMentionedUsers(
+  client: Awaited<ReturnType<typeof getSlackContext>>['client'],
+  rows: readonly QueueMessageRow[],
+  users: Map<string, QueueUser>,
+  budget?: SlackRequestBudget,
+): Promise<void> {
+  const missing = [
+    ...new Set(rows.flatMap((row) => row.mentionedUserIds)),
+  ].filter((id) => !users.has(id));
+  if (missing.length === 0) return;
+
+  const vip = await prisma.user.findMany({
+    where: { id: { in: missing } },
+    select: { id: true, isVip: true },
+  });
+  const vipMap = new Map(vip.map((row) => [row.id, row.isVip]));
+
+  await mapWithConcurrency(missing, SLACK_HYDRATION_CONCURRENCY, async (id) => {
+    const raw = await hydrateUser(client, id, budget).catch(() => null);
+    if (!raw) return;
+    const user = normalizeUser(raw);
+    users.set(id, {
+      id,
+      username: user.username ?? null,
+      realName: user.realName ?? null,
+      displayName: user.displayName ?? null,
+      avatarUrl: user.avatarUrl ?? null,
+      isBot: user.isBot ?? false,
+      isVip: vipMap.get(id) ?? false,
+    });
+  });
+}
+
 export async function resolveConversationScope(nameOrId: string): Promise<QueueScope | null> {
   const wanted = nameOrId.trim().replace(/^#/, ''); if (!wanted) return null;
   const context = await getSlackContext();
@@ -149,6 +191,7 @@ export async function loadConversationContext(conversationId: string, request: C
   const conversation = conversations.get(conversationId) ?? { ...stored, name: null };
   const rows = fakeDb.map((identity, index) => liveRow(identity, raw[index] ?? null, conversation));
   void ids;
+  await hydrateMentionedUsers(context.client, rows, users);
   return buildContextPage(rows, request.limit, users, conversations, context.authedUserId);
 }
 
@@ -164,6 +207,7 @@ export async function loadInbox(options: { limit?: number } = {}): Promise<Inbox
   const rows = await mapWithConcurrency(messages, SLACK_HYDRATION_CONCURRENCY, async (db) => candidateIds.has(db.id)
     ? liveRow(db, await hydrateExactMessage(context.client, db.conversationId, db.ts, budget).catch(() => null), conversations.get(db.conversationId) ?? { ...db.conversation, name: null })
     : { ...unavailable(db, true), conversation: conversations.get(db.conversationId) ?? { ...db.conversation, name: null } });
+  await hydrateMentionedUsers(context.client, rows, users, budget);
   const participation = new Set<string>(); messages.filter((row) => context.authedUserId && row.userId === context.authedUserId).forEach((row) => participation.add(threadKey(row.conversationId, row.threadTs ?? row.ts)));
   messages.filter((row) => row.isCandidate && row.conversation.kind !== 'IM' && row.conversation.kind !== 'MPIM').forEach((row) => participation.add(threadKey(row.conversationId, row.threadTs ?? row.ts)));
   let items = buildQueue(rows, { authedUserId: context.authedUserId, participatingThreadKeys: participation, users, conversations });

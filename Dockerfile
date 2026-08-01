@@ -40,6 +40,15 @@ RUN ./node_modules/.bin/esbuild scripts/backfill.ts \
   --external:@prisma/client \
   --external:@slack/web-api \
   --outfile=/app/backfill.cjs
+# Demo mode's seeder, for the released image (docker-compose.demo.yml runs it
+# on first boot). Bundled for the same reason as the others: the runtime image
+# has no tsx.
+RUN ./node_modules/.bin/esbuild scripts/demo-seed.ts \
+  --bundle \
+  --platform=node \
+  --format=cjs \
+  --external:@prisma/client \
+  --outfile=/app/demo-seed.cjs
 RUN ./node_modules/.bin/esbuild scripts/socket.ts \
   --bundle \
   --platform=node \
@@ -56,6 +65,7 @@ RUN npm prune --omit=dev --ignore-scripts \
   && npm pkg set \
     'scripts.db:privacy-prepare=node privacy-pre-migration.cjs' \
     'scripts.backfill=node backfill.cjs' \
+    'scripts.demo:seed=node demo-seed.cjs' \
     'scripts.socket=node socket.cjs'
 
 
@@ -71,6 +81,7 @@ COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/privacy-pre-migration.cjs ./privacy-pre-migration.cjs
 COPY --from=builder /app/backfill.cjs ./backfill.cjs
+COPY --from=builder /app/demo-seed.cjs ./demo-seed.cjs
 COPY --from=builder /app/socket.cjs ./socket.cjs
 COPY --from=production-dependencies /app/package.json ./package.json
 COPY --from=builder /app/next.config.mjs ./next.config.mjs

@@ -1260,6 +1260,89 @@ authorized the app during setup (`U0BEHBXNGHK`, alongside the owner
 person's encrypted user token and should probably be deleted — left alone
 because deleting someone's credentials is the user's call.
 
+## Phase 11: Shipping (Horizons submission)
+**Status:** In progress
+
+**Why this exists (not in the original plan).** Requested by the user,
+2026-07-31: get the project ready to ship against the Hack Club Horizons
+shipping guide. The guide wants a public repo, a README with motivation, how it
+works, tech stack and screenshots, and — for anything a reviewer is meant to
+try — a way to actually run it. SlackZero had none of the last three: it is a
+Slack client, so "try it" meant creating a Slack app and running OAuth.
+
+**Scope decision (user, 2026-07-31).** Not deployed. The user chose to keep the
+project local-only and ship a downloadable build through GitHub Releases
+instead, rather than hosting an instance that would hold their Slack user
+token.
+
+**What was built**
+- **Demo mode.** `SLACKZERO_DEMO=1` runs the whole app against a seeded fake
+  workspace (`src/lib/demo/`): 58 messages over 7 conversations, with a bump
+  chain, a thread, a snooze, two outstanding asks, and a week of completed
+  triage so `/stats` has a trend. Message text is served from the fixture file
+  at render time — the same seam Slack fills on a real install, so nothing
+  about the privacy model changes.
+- **A guard, because this is a login bypass by construction.** Demo mode signs
+  a visitor in without Slack, so `src/lib/demo/guard.ts` refuses unless the
+  flag is set *and* the database holds no `SlackInstallation`. `npm run
+  demo:setup` therefore builds a separate database. `e2e/auth.spec.ts` asserts
+  the route 404s on the connected install the suite runs against.
+- **Synthetic content, unified.** The e2e fixtures already had a stand-in for
+  Slack text hard-coded in `src/lib/slack/live.ts`. Both stand-ins now go
+  through `src/lib/slack/synthetic.ts`, which returns null when no flag is set,
+  so the live path is unchanged and unreachable by accident.
+- **Release artifact.** `npm run package:release` builds
+  `dist/slackzero-v<version>.zip` from `git archive` (committed files only, so
+  `.env` cannot leak). `docker-compose.demo.yml` gives a reviewer one command
+  and no prerequisites but Docker. `RELEASE.md` documents both.
+- **README rewritten** for the guide: motivation, how it works, tech stack,
+  five generated screenshots, Horizons attribution, MIT `LICENSE`.
+- **`npm run screenshots`** drives the demo with Playwright, so the README
+  images are reproducible and contain no real Slack content.
+
+**Three bugs the demo surfaced, all fixed here.** None were reachable on the
+user's own workspace, which is why they survived Phases 6-9:
+1. **"Waiting on Others" could never show anything.** Waiting state is written
+   onto the message *you sent*, and `queueReasonFor()` dropped every message
+   authored by the user before any view saw it. The view was verified in Phase
+   6 against a workspace with no outgoing asks (see KNOWN_ISSUES.md), so it
+   looked empty for the expected reason. Fixed with a `waiting` queue reason
+   that only a `waitingOnly` view admits, so your own messages still never
+   appear in an ordinary inbox.
+2. **The "Triaged per day" chart never drew a bar.** The bars size themselves
+   as a percentage of a parent that had no height, so every one resolved to
+   0px. The e2e spec asserts the data attributes, which were correct
+   throughout. Fixed with `h-full` on the list item.
+3. **Mentions of non-authors rendered as raw Slack ids.** User profiles were
+   hydrated for message *senders* only, so `<@U…>` for anyone who had not
+   spoken in the loaded window — including yourself in a channel — printed as
+   `@U0BK9FR4Y1M`. Fixed by hydrating mentioned ids in both the inbox and the
+   conversation-context path.
+
+**Verification (2026-07-31)**
+- `npm run test` → 673 tests / 36 files passed.
+- `npm run typecheck`, `npm run lint`, `npm run build` all clean.
+- Demo verified end to end in the released shape: `docker compose -f
+  docker-compose.demo.yml up --build` from a clean volume, sign-in, queue,
+  reading pane, saved views and `/stats` all rendering seeded content. The
+  screenshots in the README are that instance.
+- Demo mode's refusal verified by hand against a non-demo build:
+  `POST /api/demo/signin` → 404 `demo_unavailable`, `/inbox` → 307 to the
+  connect screen.
+
+**`npm run test:e2e` did NOT run — blocked on machine state, not on code.**
+The local Postgres volume was initialised fresh at the start of this session
+(`PG_VERSION` timestamped 2026-08-01 03:31 UTC), so the development database
+has no `SlackInstallation` in it, and `e2e/fixtures/auth.ts` cannot mint an
+owner session without one — it refuses to invent an installation on purpose.
+Migrations have been re-applied to that database, so the fix is to reconnect
+Slack (`npm run dev:https` → Connect Slack) and re-run the suite. Nothing here
+required a Slack call to verify, but the suite is the only thing that exercises
+`e2e/auth.spec.ts`'s new demo-refusal case in situ.
+
+**Left for the user.** Publishing the GitHub release, recording the demo video,
+and linking the correct Hackatime project — all outside what this repo can do.
+
 ## Done Criteria for the Overall Project
 All 8 phases marked `Done`, full test suite green, and a working app that can
 OAuth into a real Slack workspace, ingest DMs/mentions, classify and sort

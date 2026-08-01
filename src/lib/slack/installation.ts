@@ -1,6 +1,11 @@
 import type { SlackInstallation } from '@prisma/client';
 
 import { prisma } from '@/lib/db';
+import {
+  DEMO_OWNER_USER_ID,
+  DEMO_TEAM_ID,
+  isDemoMode,
+} from '@/lib/demo/workspace';
 import { getOwnerUserId } from '@/lib/env';
 import { decryptSlackToken, encryptSlackToken } from '@/lib/slack/token-crypto';
 
@@ -101,6 +106,13 @@ export async function getOwnerIdentity(): Promise<{
       });
 
   if (!row) {
+    // Demo mode has no installation by definition — its guard refuses to run
+    // on a database that has one — so the demo owner is the owner. Checked
+    // before `configured` because a `SLACK_OWNER_USER_ID` left in `.env` from
+    // a real install must not decide who owns a throwaway demo database.
+    if (isDemoMode()) {
+      return { teamId: DEMO_TEAM_ID, authedUserId: DEMO_OWNER_USER_ID };
+    }
     // A configured owner who has not connected yet still *is* the owner; say
     // so, or first-use OAuth would be rejected as "not the owner".
     return configured ? { teamId: '', authedUserId: configured } : null;

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 
 import { getOwnerSession } from '@/lib/auth/require';
+import { isDemoAvailable } from '@/lib/demo/guard';
 import { isSlackConfigured } from '@/lib/env';
 import {
   getPublicInstallation,
@@ -25,6 +26,16 @@ export default async function HomePage({
   };
 }) {
   const session = await getOwnerSession();
+
+  // Demo mode replaces the connect screen's dead end with a way in. Off unless
+  // SLACKZERO_DEMO=1, and refused outright on a database that holds a real
+  // installation — so this is false on any connected install.
+  let demoAvailable = false;
+  try {
+    demoAvailable = await isDemoAvailable();
+  } catch {
+    demoAvailable = false;
+  }
 
   let installation: PublicInstallation | null = null;
   let dbError = false;
@@ -75,6 +86,25 @@ export default async function HomePage({
           who connected first) can open the inbox.
         </p>
       )}
+
+      {demoAvailable && !session ? (
+        <section className="rounded border border-violet-300 bg-violet-50 p-4">
+          <h2 className="text-lg font-medium text-violet-900">Demo mode</h2>
+          <p className="mt-1 text-sm text-violet-900">
+            No Slack app, no tokens, nothing sent anywhere — a seeded fake
+            workspace so you can see what the triage queue actually does. Press{' '}
+            <kbd>?</kbd> in the inbox for the shortcuts.
+          </p>
+          <form action="/api/demo/signin" method="post">
+            <button
+              className="mt-3 rounded bg-violet-700 px-4 py-2 text-sm font-medium text-white"
+              type="submit"
+            >
+              Enter the demo →
+            </button>
+          </form>
+        </section>
+      ) : null}
 
       {searchParams.signed_out ? (
         <p className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">

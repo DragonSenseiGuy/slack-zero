@@ -102,7 +102,11 @@ anything in `src/lib/reply/`.
 - bump collapsing against real bump chains (there are none)
 - the "one click + read to triage" design goal for thread replies (no threads)
 - waiting-on detection (no outgoing asks at all — `waiting:scan` correctly
-  reports 0)
+  reports 0). This one bit: because the view was only ever seen empty for a
+  legitimate reason, nobody noticed it *could not* fill. Messages the user sent
+  were dropped from the queue before any view saw them, so "Waiting on Others"
+  was structurally empty on every install. Found by seeding demo mode with
+  outgoing asks, fixed in Phase 11.
 
 **How to close it:** use the app for a week on a workspace with real traffic,
 then re-run `npm run triage:eval` and read the spot-check output from

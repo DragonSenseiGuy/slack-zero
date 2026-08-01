@@ -1261,7 +1261,7 @@ person's encrypted user token and should probably be deleted — left alone
 because deleting someone's credentials is the user's call.
 
 ## Phase 11: Shipping (Horizons submission)
-**Status:** In progress
+**Status:** Done — except `npm run test:e2e`, blocked on machine state (see below)
 
 **Why this exists (not in the original plan).** Requested by the user,
 2026-07-31: get the project ready to ship against the Hack Club Horizons
@@ -1326,6 +1326,11 @@ user's own workspace, which is why they survived Phases 6-9:
   docker-compose.demo.yml up --build` from a clean volume, sign-in, queue,
   reading pane, saved views and `/stats` all rendering seeded content. The
   screenshots in the README are that instance.
+- The release artifact itself verified as a reviewer receives it: `npm run
+  package:release`, unzipped into a different directory, `docker compose -f
+  docker-compose.demo.yml up --build` from no volumes at all → demo sign-in and
+  the seeded queue both render. The archive contains `.env.example` and no
+  `.env`.
 - Demo mode's refusal verified by hand against a non-demo build:
   `POST /api/demo/signin` → 404 `demo_unavailable`, `/inbox` → 307 to the
   connect screen.
